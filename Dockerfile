@@ -1,6 +1,8 @@
 # FlaVR Bot image. Built by Portainer from this repo (docker-compose.yml), or by hand:
 #   docker build -t flavr-bot .
-FROM python:3.12-slim
+# bookworm (Debian 12): Playwright 1.49 installs Chromium's system libraries only on Debian 12 /
+# Ubuntu; the plain "3.12-slim" tag moved to Debian 13, where "playwright install --with-deps" fails.
+FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

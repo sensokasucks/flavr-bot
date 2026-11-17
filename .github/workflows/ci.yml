@@ -11,3 +11,16 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q
+  # Builds the Docker image the way Portainer does, so a broken Dockerfile (a base image
+  # moving to a new Debian, a missing package) shows up here instead of on the Linux box.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t flavr-bot-ci .
+      - name: Chromium draws a page inside the image
+        run: >
+          docker run --rm --entrypoint python flavr-bot-ci -c
+          "import asyncio; from flavrbot.render import Screenshotter;
+          png = asyncio.run(Screenshotter().png('<h1>FlaVR 日本語 ✓</h1>'));
+          assert png[:4] == b'\x89PNG', 'no picture'; print('picture', len(png), 'bytes')"

@@ -5,6 +5,9 @@ services:
   flavr-bot:
     build: .
     image: flavr-bot:latest
+    # always build here from this repo; never try to download "flavr-bot" from Docker Hub (it isn't
+    # there). Without this, Portainer's "Re-pull image" on redeploy fails with "pull access denied".
+    pull_policy: build
     container_name: flavr-bot
     restart: unless-stopped
     # host network: /wake's Wake-on-LAN broadcast must reach the home network, and Stream Core on

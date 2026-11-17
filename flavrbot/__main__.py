@@ -71,7 +71,7 @@ async def main() -> int:
         poster = CalendarPoster(store, bot, ImageCache(Path(s.data_dir) / "cache" / "img", http), shooter,
                                 tz=s.timezone, preview_hour=s.calendar_preview_hour, recap_hour=s.calendar_recap_hour,
                                 ping=lambda: pinger.switches().get("calendar", False), quiet=pinger.quiet_now,
-                                hold=lambda text: pinger.ping("calendar", text))
+                                hold=lambda text: pinger.ping("calendar", text), backfill=watcher.backfill)
         bot.calendar = poster
         link.extra_routes.append(lambda app: add_routes(app, poster))
 
@@ -99,7 +99,15 @@ async def main() -> int:
             await bot.ready_event.wait()        # posts need the Discord channels loaded
             await job()
 
+        async def fill_in() -> None:
+            # the bot only knows streams it saw live: fill last week and this week from the platforms
+            # (after the first checks have found everyone's channel ids)
+            await asyncio.sleep(120)
+            for off in (-1, 0):
+                await poster.ensure_backfill(poster.week_of(off), force=True)
+
         tasks = [asyncio.create_task(pinger.run(), name="pings"),
+                 asyncio.create_task(after_ready(fill_in), name="backfill"),
                  asyncio.create_task(after_ready(poster.run), name="calendar"),
                  asyncio.create_task(after_ready(watcher.run_schedules), name="schedules")]
         for platform, checker in checkers.items():

@@ -21,6 +21,12 @@ Saved in the database (kv):
   calendar_channel.<group>  channel id (/setup calendar-channel)
   calendar_post.<group>     {week, channel, message, sig, drawn_at}: the live board post
   calendar_recap.<group>    the week (ISO date of its Sunday) whose recap was posted
+  backfill.<week>           when that week (ISO date of its Sunday) was last filled in from the
+                            platforms (``ensure_backfill``; the bot only knows what it saw live)
+
+Filling in (``backfill``, set by flavrbot/__main__.py to Watcher.backfill): last week and this week
+once at start-up, a past week the first time someone looks at it (/calendar view, the web page),
+again once a week is over, and right before the Saturday recap. /calendar refresh does it by hand.
 
 Who calls it: flavrbot/__main__.py builds one and runs ``run()``; the watcher's start / end /
 scheduled callbacks call ``poke()``; flavrbot/bot.py's /calendar and /setup calendar-channel use
@@ -35,7 +41,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from .calendar import DAY_NAMES, Tile, Week, build_week, changes, week_start
@@ -122,7 +128,8 @@ class CalendarPoster:
     def __init__(self, store: Store, discord: Any, images: ImageCache, shooter: Optional[Screenshotter],
                  tz: str = "America/New_York", preview_hour: int = 10, recap_hour: int = 23,
                  ping: Optional[Callable[[], bool]] = None, quiet: Optional[Callable[[], bool]] = None,
-                 hold: Optional[Callable[[str], Any]] = None, clock: Callable[[], float] = time.time):
+                 hold: Optional[Callable[[str], Any]] = None, clock: Callable[[], float] = time.time,
+                 backfill: Optional[Callable[[float, float], Awaitable[int]]] = None):
         self.store = store
         self.discord = discord
         self.images = images
@@ -137,6 +144,7 @@ class CalendarPoster:
         self.quiet = quiet or (lambda: False)       # Pinger.quiet_now
         self.hold = hold                            # Pinger.ping("calendar", text): held during quiet hours
         self.clock = clock
+        self.backfill = backfill                    # Watcher.backfill(start, end) → sessions added
         self._poke = asyncio.Event()
         self._lock = asyncio.Lock()
         self._seen: Dict[str, Tuple[str, Dict[str, Tile]]] = {}    # group → (week, {key: tile}) last look
@@ -176,9 +184,34 @@ class CalendarPoster:
             log.warning("calendar picture failed: %s", self.errors["picture"])
             return None
 
+    async def ensure_backfill(self, start: datetime, force: bool = False) -> int:
+        """Fill the week starting ``start`` from the platforms' past streams, unless that was already
+        done after the week ended (a week still running is done again once it's over). ``force``:
+        always (start-up, the recap, /calendar refresh). Returns how many streams were added."""
+        if self.backfill is None:
+            return 0
+        now = self.clock()
+        if start.timestamp() > now:
+            return 0                                # a future week has no past streams
+        key = f"backfill.{start.date().isoformat()}"
+        end = (start + timedelta(days=7)).timestamp()
+        if not force and float(self.store.get(key) or 0) >= min(end, now - 6 * 3600):
+            return 0
+        try:
+            added = await self.backfill(start.timestamp(), min(end, now))
+        except Exception:
+            log.exception("filling in past streams failed")
+            return 0
+        self.store.put(key, now)
+        if added:
+            self.poke()
+        return added
+
     async def view_png(self, group: str, offset: int = 0) -> Tuple[Week, Optional[bytes]]:
         """/calendar: (the week, its picture). Last week is shown as a recap."""
         start = self.week_of(offset)
+        if offset < 0:
+            await self.ensure_backfill(start)
         week = self.build(group, start, recap=offset < 0)
         return week, await self.png(week)
 
@@ -217,6 +250,7 @@ class CalendarPoster:
 
         # Saturday night recap (once per week)
         if wday == 6 and local.hour >= self.recap_hour and self.store.get(f"calendar_recap.{group}") != this_week.date().isoformat():
+            await self.ensure_backfill(this_week, force=True)     # streams missed while the bot was down
             week = self.build(group, this_week, recap=True)
             png = await self.png(week)
             if await self.discord.cal_send(channel, embed(week), png, f"recap-{this_week:%Y-%m-%d}.png"):

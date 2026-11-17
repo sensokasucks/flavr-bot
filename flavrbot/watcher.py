@@ -30,6 +30,12 @@ Twitch account every SCHEDULE_EVERY (6 h), and each YouTube check saves the wait
 found. Both land in the ``scheduled`` table; ``on_scheduled(person, item)`` is called for each
 item the bot hadn't seen before (flavrbot/calendar_post.py turns those into calendar pings).
 
+Weeks the bot wasn't watching (it only knows what it saw live): ``backfill(start, end)`` asks
+each platform for the streams that FINISHED in that time (Twitch past broadcasts, YouTube's uploads
+list with real start / end times; Kick's API has no list of past streams) and saves the ones the
+watcher didn't already have as normal sessions marked source "vod". flavrbot/calendar_post.py
+calls it (``ensure_backfill``) for last week, at start-up, and before the Saturday recap.
+
 What happens on a change is the bot's business (flavrbot/bot.py ``LivePoster``): ``on_start``
 posts in the person's group channel and returns where, ``on_change`` edits it when the
 platforms or title change, ``on_end`` edits it to "was live" with the length and VOD. Sessions
@@ -48,6 +54,7 @@ from .store import PLATFORMS, Store
 
 log = logging.getLogger("flavrbot.watcher")
 RESTART_GRACE = 15 * 60.0
+BACKFILL_MERGE = 30 * 60.0     # backfill: one person's streams on two platforms this close = one multistream
 SCHEDULE_EVERY = 6 * 3600.0     # Twitch schedule look-ups: one call per Twitch account this often
 
 # on_start(person, session, infos) -> (channel id, message id) or ("", "")
@@ -198,6 +205,62 @@ class Watcher:
             elif p == "kick" and links[p]:
                 return links[p].rstrip("/") + "/videos", ""
         return "", ""
+
+    async def backfill(self, start: float, end: float) -> int:
+        """Fill [start, end) (unix s) with finished streams from the platforms' own lists; returns how
+        many sessions were added. The same person on two platforms within BACKFILL_MERGE (or
+        overlapping) = one multistream session. Anything that overlaps a session the bot already has
+        is skipped, and so is anything that ended in the last RESTART_GRACE (it may still be live:
+        the watcher owns that one)."""
+        now = self.clock()
+        known = {}
+        for s in self.store.sessions_between(start - 86400, end):
+            known.setdefault(s["person_id"], []).append((float(s["started_at"]), float(s["ended_at"] or now)))
+        added = 0
+        for person in self.store.people():
+            found: List[Dict[str, Any]] = []
+            for a in person.get("accounts") or []:
+                c = self.checkers.get(a["platform"])
+                if not a.get("platform_id") or c is None or not getattr(c, "ready", True) \
+                        or not hasattr(c, "past_streams"):
+                    continue
+                try:
+                    for v in await c.past_streams(a["platform_id"], start, end):
+                        found.append({**v, "platform": a["platform"]})
+                except Exception as e:      # one platform failing mustn't stop the rest
+                    log.info("%s past streams for %s failed: %s", a["platform"].title(), person["name"], e)
+            merged: List[Dict[str, Any]] = []
+            for v in sorted(found, key=lambda v: v["started_at"]):
+                if v["ended_at"] > now - RESTART_GRACE:
+                    continue
+                twin = next((m for m in merged if abs(m["started_at"] - v["started_at"]) < BACKFILL_MERGE
+                             or (v["started_at"] < m["ended_at"] and m["started_at"] < v["ended_at"])), None)
+                if twin:
+                    twin["ended_at"] = max(twin["ended_at"], v["ended_at"])
+                    twin["links"].setdefault(v["platform"], v["url"])
+                    twin["thumbs"].setdefault(v["platform"], v.get("thumb") or "")
+                    if v["platform"] not in twin["platforms"]:
+                        twin["platforms"].append(v["platform"])
+                    continue
+                merged.append({**v, "platforms": [v["platform"]], "links": {v["platform"]: v["url"]},
+                               "thumbs": {v["platform"]: v.get("thumb") or ""}})
+            mine = known.get(person["id"], [])
+            for m in merged:
+                if any(m["started_at"] < b and a < m["ended_at"] for a, b in mine):
+                    continue                # the watcher saw this one (or an earlier backfill did)
+                # the VOD link / picture of the person's main platform first (default YouTube)
+                main = next((p for p in [person.get("main_platform") or "youtube", *PLATFORMS] if p in m["links"]))
+                vod = m["links"][main]
+                thumb = m["thumbs"][main] or next((t for t in m["thumbs"].values() if t), "")
+                self.store.start_session(person["id"], m["started_at"], ended_at=m["ended_at"],
+                                         last_seen=m["ended_at"], platforms=m["platforms"], links=m["links"],
+                                         title=m["title"], url=vod, thumb=thumb, vod_url=vod, vod_thumb=thumb,
+                                         source="vod")
+                mine.append((m["started_at"], m["ended_at"]))
+                added += 1
+        if added:
+            log.info("Filled in %d past stream(s) from the platforms", added)
+        return added
 
     async def run_platform(self, platform: str) -> None:
         while True:

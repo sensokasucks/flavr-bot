@@ -112,6 +112,9 @@ ADDED_COLUMNS = (
     ("sessions", "vod_url", "TEXT NOT NULL DEFAULT ''"),
     ("sessions", "vod_thumb", "TEXT NOT NULL DEFAULT ''"),
     ("people", "hidden", "INTEGER NOT NULL DEFAULT 0"),
+    # "" = the watcher saw it live; "vod" = filled in afterwards from the platform's past broadcasts
+    # (Watcher.backfill), so it never had a schedule to compare with (no LATE NOTICE tag)
+    ("sessions", "source", "TEXT NOT NULL DEFAULT ''"),
 )
 
 

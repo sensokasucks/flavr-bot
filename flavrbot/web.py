@@ -73,6 +73,8 @@ def ics(weeks: List[Week], now: float) -> str:
 def add_routes(app: web.Application, poster: CalendarPoster) -> None:
     async def board(request: web.Request) -> web.Response:
         off = _offset(request)
+        if off < 0:
+            await poster.ensure_backfill(poster.week_of(off))     # last week: fill in from the platforms once
         week = poster.build(_group(request), poster.week_of(off), recap=off < 0)
         await poster.images.fetch_all(week)
         img = lambda u: f"/calendar/img/{poster.images.name(u)}" if u and poster.images.path(u).exists() else ""  # noqa: E731
@@ -81,6 +83,8 @@ def add_routes(app: web.Application, poster: CalendarPoster) -> None:
 
     async def picture(request: web.Request) -> web.Response:
         off = _offset(request)
+        if off < 0:
+            await poster.ensure_backfill(poster.week_of(off))
         week = poster.build(_group(request), poster.week_of(off), recap=off < 0)
         png = await poster.png(week)
         if not png:

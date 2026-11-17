@@ -19,6 +19,7 @@ up to an hour to show the first time):
     /setup live-channel group channel                   where go-live posts go for a group
     /setup calendar-channel group channel               where the weekly calendar + recap go
     /calendar post [group]  a fresh calendar post now
+    /calendar refresh [week]  fill a week in again from the channels' past streams (VODs)
   Owner only (answers only you can see)
     /status             Stream Core, the stream, this PC, the watcher
     /wake               Wake-on-LAN the stream PC
@@ -561,6 +562,20 @@ class FlavrBot(discord.Client):
             async with bot.calendar._lock:
                 await bot.calendar.refresh(g, force_new=True)
             await inter.followup.send("Posted.", ephemeral=True)
+
+        @calendar.command(name="refresh", description="Fill a week in from the channels' past streams (VODs)")
+        @app_commands.choices(week=week_choices[::2])
+        async def calendar_refresh(inter: discord.Interaction, week: Optional[app_commands.Choice[int]] = None):
+            if not await managers_only(inter):
+                return
+            if not bot.calendar:
+                await inter.response.send_message("The calendar isn't running.", ephemeral=True)
+                return
+            await inter.response.defer(ephemeral=True, thinking=True)
+            off = week.value if week else -1
+            added = await bot.calendar.ensure_backfill(bot.calendar.week_of(off), force=True)
+            await inter.followup.send(f"Found {added} stream(s) the bot hadn't seen. Twitch keeps past broadcasts "
+                                      "7 days (60 for partners); Kick has no list of past streams.", ephemeral=True)
 
         tree.add_command(calendar)
 

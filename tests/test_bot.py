@@ -16,9 +16,9 @@ async def test_commands_register():
     assert names == ["calendar", "friend", "live", "pings", "points", "queue", "schedule", "setup", "status", "wake"]
     friend = next(c for c in bot.tree.get_commands() if c.name == "friend")
     assert sorted(c.name for c in friend.commands) == ["add", "hide", "import", "list", "main", "remove",
-                                                       "schedule", "unschedule"]
+                                                       "schedule", "unschedule", "x"]
     setup = next(c for c in bot.tree.get_commands() if c.name == "setup")
-    assert sorted(c.name for c in setup.commands) == ["calendar-channel", "live-channel"]
+    assert sorted(c.name for c in setup.commands) == ["calendar-channel", "live-channel", "share-style"]
     # every command's description fits Discord's 100-character limit
     for c in bot.tree.walk_commands():
         assert len(c.description) <= 100, c.name

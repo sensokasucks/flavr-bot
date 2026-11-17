@@ -32,7 +32,11 @@ Who calls it: flavrbot/__main__.py builds one and runs ``run()``; the watcher's 
 scheduled callbacks call ``poke()``; flavrbot/bot.py's /calendar and /setup calendar-channel use
 ``view_png``, ``embed`` and ``refresh``. ``discord`` is the bot (FlavrBot): it must offer
 ``cal_send(channel, embed, png, name)`` → message id or "", ``cal_edit(channel, message, embed,
-png, name)`` → True/False, and ``dm_owner(text, png=None)``.
+png, name)`` → True/False, ``dm_owner(text, png=None)`` and ``dm_share(messages, png)``.
+
+Share (flavrbot/share.py): after the Sunday post and the Saturday recap, when the /pings switch
+"share" is on, the owner gets copy-ready text for other Discords and X (held until quiet hours
+end). /calendar share sends it any time.
 """
 
 from __future__ import annotations
@@ -45,6 +49,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from .calendar import DAY_NAMES, Tile, Week, build_week, changes, week_start
+from .share import X_STYLES, discord_text, x_posts
 from .render import ImageCache, Screenshotter, logo_data_url, page
 from .store import GROUPS, Store
 
@@ -129,7 +134,8 @@ class CalendarPoster:
                  tz: str = "America/New_York", preview_hour: int = 10, recap_hour: int = 23,
                  ping: Optional[Callable[[], bool]] = None, quiet: Optional[Callable[[], bool]] = None,
                  hold: Optional[Callable[[str], Any]] = None, clock: Callable[[], float] = time.time,
-                 backfill: Optional[Callable[[float, float], Awaitable[int]]] = None):
+                 backfill: Optional[Callable[[float, float], Awaitable[int]]] = None,
+                 share_on: Optional[Callable[[], bool]] = None):
         self.store = store
         self.discord = discord
         self.images = images
@@ -145,6 +151,8 @@ class CalendarPoster:
         self.hold = hold                            # Pinger.ping("calendar", text): held during quiet hours
         self.clock = clock
         self.backfill = backfill                    # Watcher.backfill(start, end) → sessions added
+        self.share_on = share_on or (lambda: False)  # Pinger switch "share"
+        self._shares: List[Tuple[Week, Optional[bytes]]] = []    # waiting for quiet hours to end
         self._poke = asyncio.Event()
         self._lock = asyncio.Lock()
         self._seen: Dict[str, Tuple[str, Dict[str, Tile]]] = {}    # group → (week, {key: tile}) last look
@@ -215,6 +223,45 @@ class CalendarPoster:
         week = self.build(group, start, recap=offset < 0)
         return week, await self.png(week)
 
+    def share_messages(self, week: Week, style: str = "") -> List[str]:
+        """The copy-ready texts: a short note, the Discord version, then each X post. ``style``: an X
+        style (flavrbot/share.py X_STYLES); "" = the saved default (/setup share-style)."""
+        style = style if style in X_STYLES else (self.store.get("share_x_style") or "reply")
+        handles = {p["id"]: p.get("x_handle") or "" for p in self.store.people(week.group)}
+        xs = x_posts(week, handles, style)
+        after = {"reply": "the X post, then its links to paste as a reply." if len(xs) > 1 else "the X post.",
+                 "one": "the X post.", "thread": f"an X thread of {len(xs)} posts." if len(xs) > 1 else "the X post."}
+        note = ("📋 Copy-ready calendar. Long-press (phone) or right-click (PC) a message → Copy Text. "
+                "Next: the Discord version, then " + after.get(style, "the X post."))
+        return [note, discord_text(week)] + xs
+
+    async def share(self, group: str, offset: int = 0, style: str = "") -> bool:
+        """/calendar share: DM the package for this (0), next (1) or last (-1, the recap) week now."""
+        start = self.week_of(offset)
+        if offset < 0:
+            await self.ensure_backfill(start)
+        week = self.build(group, start, recap=offset < 0)
+        return await self._send_share(week, await self.png(week), style)
+
+    async def _send_share(self, week: Week, png: Optional[bytes], style: str = "") -> bool:
+        try:
+            await self.discord.dm_share(self.share_messages(week, style), png)
+            return True
+        except Exception:
+            log.exception("calendar share DM failed")
+            return False
+
+    def _share_later(self, week: Week, png: Optional[bytes]) -> None:
+        """After an automatic post: queue the package if the switch is on (sent by flush_shares)."""
+        if self.share_on():
+            self._shares.append((week, png))
+
+    async def flush_shares(self) -> None:
+        if self._shares and not self.quiet():
+            todo, self._shares = self._shares, []
+            for week, png in todo:
+                await self._send_share(week, png)
+
     # ── the loop ───────────────────────────────────────────────────────
     async def run(self) -> None:
         while True:
@@ -236,6 +283,7 @@ class CalendarPoster:
                     await self.refresh(g)
             self.images.prune()
             await self.flush_pings()
+            await self.flush_shares()
 
     async def refresh(self, group: str, force_new: bool = False) -> None:
         """Bring one group's posts up to date (see the module notes for the rhythm)."""
@@ -256,6 +304,7 @@ class CalendarPoster:
             if await self.discord.cal_send(channel, embed(week), png, f"recap-{this_week:%Y-%m-%d}.png"):
                 self.store.put(f"calendar_recap.{group}", this_week.date().isoformat())
                 self._note(f"{GROUP_NAMES.get(group, group)} week in review posted", png)
+                self._share_later(week, png)
 
         # which week the live board shows: a new post for a new week from Sunday PREVIEW_HOUR on
         posted_week = post.get("week") or ""
@@ -272,6 +321,7 @@ class CalendarPoster:
                 self._seen[group] = (this_week.date().isoformat(), {t.key: t for t in week.tiles()})
                 if new_week_due and posted_week:
                     self._note(f"New {GROUP_NAMES.get(group, group)} week posted", png)
+                    self._share_later(week, png)
             return
         await self._edit(group, post)
 

@@ -20,6 +20,9 @@ up to an hour to show the first time):
     /setup calendar-channel group channel               where the weekly calendar + recap go
     /calendar post [group]  a fresh calendar post now
     /calendar refresh [week]  fill a week in again from the channels' past streams (VODs)
+    /calendar share [group] [week] [style]   DMs you copy-ready text for other Discords and X (flavrbot/share.py)
+    /setup share-style style   the X text's default layout (post + links reply / one post / 280 thread)
+    /friend x name handle   their X handle, so the X text tags them ("-" removes it)
   Owner only (answers only you can see)
     /status             Stream Core, the stream, this PC, the watcher
     /wake               Wake-on-LAN the stream PC
@@ -47,6 +50,7 @@ from .calendar import DAY_NAMES
 from .config import Settings
 from .core_link import CoreLink
 from .pings import KINDS, Pinger, length
+from .share import X_STYLES
 from .store import GROUPS, PLATFORMS, Store
 from .watcher import Watcher, main_platform
 
@@ -137,6 +141,14 @@ class FlavrBot(discord.Client):
         user = self.get_user(self.settings.owner_id) or await self.fetch_user(self.settings.owner_id)
         files = [discord.File(io.BytesIO(png), filename="calendar.png")] if png else []
         await user.send(text, files=files, allowed_mentions=NO_PINGS)
+
+    async def dm_share(self, messages: List[str], png: Optional[bytes] = None) -> None:
+        """flavrbot/calendar_post.py's share package: the picture with the first message, then one DM
+        per text so each copies on its own. No link previews (they'd hide the text on a phone)."""
+        user = self.get_user(self.settings.owner_id) or await self.fetch_user(self.settings.owner_id)
+        for i, text in enumerate(messages):
+            files = [discord.File(io.BytesIO(png), filename="calendar.png")] if png and i == 0 else []
+            await user.send(text[:2000], files=files, allowed_mentions=NO_PINGS, suppress_embeds=True)
 
     # ── calendar posts (flavrbot/calendar_post.py calls these) ─────────
     async def cal_send(self, channel_id: str, data: Dict[str, Any], png: Optional[bytes], name: str) -> str:
@@ -528,9 +540,28 @@ class FlavrBot(discord.Client):
             await inter.response.send_message(f"{p['name']} is {'off' if hidden else 'back on'} the calendar.",
                                               ephemeral=True)
 
+        @friend.command(name="x", description="Their X / Twitter handle, so the copy-ready X text tags them")
+        @app_commands.describe(handle="Like @luluteala; - removes it")
+        async def friend_x(inter: discord.Interaction, name: str, handle: str):
+            if not await managers_only(inter):
+                return
+            p = bot.store.person(name)
+            if not p:
+                await inter.response.send_message(f"No one called {name}.", ephemeral=True)
+                return
+            h = "" if handle.strip() in ("-", "none", "") else handle.strip().lstrip("@")
+            if h and not re.fullmatch(r"\w{1,15}", h):
+                await inter.response.send_message("That isn't an X handle (letters, numbers and _ only, 15 at most).",
+                                                  ephemeral=True)
+                return
+            bot.store.set_x(p["id"], h)
+            await inter.response.send_message(f"{p['name']} is tagged as @{h} in the X text." if h else
+                                              f"{p['name']} is written by name in the X text.", ephemeral=True)
+
         tree.add_command(friend)
 
         calendar = app_commands.Group(name="calendar", description="The weekly stream calendar")
+        style_choices = [app_commands.Choice(name=label, value=k) for k, (label, _) in X_STYLES.items()]
         week_choices = [app_commands.Choice(name="This week", value=0), app_commands.Choice(name="Next week", value=1),
                         app_commands.Choice(name="Last week (recap)", value=-1)]
 
@@ -577,6 +608,23 @@ class FlavrBot(discord.Client):
             await inter.followup.send(f"Found {added} stream(s) the bot hadn't seen. Twitch keeps past broadcasts "
                                       "7 days (60 for partners); Kick has no list of past streams.", ephemeral=True)
 
+        @calendar.command(name="share", description="DMs you copy-ready text for other Discords and X")
+        @app_commands.choices(group=group_choices, week=week_choices, style=style_choices)
+        @app_commands.describe(style="X layout this time (default: /setup share-style)")
+        async def calendar_share(inter: discord.Interaction, group: Optional[app_commands.Choice[str]] = None,
+                                 week: Optional[app_commands.Choice[int]] = None,
+                                 style: Optional[app_commands.Choice[str]] = None):
+            if not await owner_only(inter):
+                return
+            if not bot.calendar:
+                await inter.response.send_message("The calendar isn't running.", ephemeral=True)
+                return
+            await inter.response.defer(ephemeral=True, thinking=True)
+            ok = await bot.calendar.share(group.value if group else "flavr", week.value if week else 0,
+                                          style.value if style else "")
+            await inter.followup.send("Sent to your DMs." if ok else "Couldn't DM you. Discord → this server → Privacy "
+                                      "Settings → allow direct messages.", ephemeral=True)
+
         tree.add_command(calendar)
 
         setup = app_commands.Group(name="setup", description="Bot settings (owner or Manage Server)")
@@ -600,5 +648,13 @@ class FlavrBot(discord.Client):
                 bot.calendar.poke()
             await inter.response.send_message(f"The {group.name} calendar goes to {channel.mention}; the first post "
                                               "comes within a minute.", ephemeral=True)
+
+        @setup.command(name="share-style", description="Default layout of the copy-ready X text")
+        @app_commands.choices(style=[app_commands.Choice(name=label, value=k) for k, (label, _) in X_STYLES.items()])
+        async def setup_share_style(inter: discord.Interaction, style: app_commands.Choice[str]):
+            if not await owner_only(inter):
+                return
+            bot.store.put("share_x_style", style.value)
+            await inter.response.send_message(f"X text: {X_STYLES[style.value][1]}.", ephemeral=True)
 
         tree.add_command(setup)

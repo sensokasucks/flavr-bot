@@ -115,6 +115,8 @@ ADDED_COLUMNS = (
     # "" = the watcher saw it live; "vod" = filled in afterwards from the platform's past broadcasts
     # (Watcher.backfill), so it never had a schedule to compare with (no LATE NOTICE tag)
     ("sessions", "source", "TEXT NOT NULL DEFAULT ''"),
+    # the person's X / Twitter handle (/friend x), used by the copy-ready X text (flavrbot/share.py)
+    ("people", "x_handle", "TEXT NOT NULL DEFAULT ''"),
 )
 
 
@@ -190,6 +192,12 @@ class Store:
             self._db.execute("UPDATE accounts SET platform_id=COALESCE(NULLIF(?, ''), platform_id), "
                              "display=COALESCE(NULLIF(?, ''), display), avatar=COALESCE(NULLIF(?, ''), avatar) WHERE id=?",
                              (platform_id, display, avatar, account_id))
+            self._db.commit()
+
+    def set_x(self, person_id: int, handle: str) -> None:
+        """/friend x: their X handle ("" removes it), without the @."""
+        with self._lock:
+            self._db.execute("UPDATE people SET x_handle=? WHERE id=?", (handle.strip().lstrip("@"), person_id))
             self._db.commit()
 
     def set_hidden(self, person_id: int, hidden: bool) -> None:

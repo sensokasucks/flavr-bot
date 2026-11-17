@@ -10,10 +10,15 @@ up to an hour to show the first time):
     /live               who you follow is live right now
     /schedule [name]    upcoming streams (Twitch schedule + YouTube scheduled streams); default the owner
     /friend list        everyone the watcher follows
+    /calendar view [group] [week]   the weekly calendar picture (last week = the recap)
   Owner (OWNER_ID) or Manage Server
     /friend add name platform handle [group] [owner]   follow a channel (adds the person if new)
     /friend remove name    /friend main name platform   /friend import list
+    /friend schedule name day time [title]   a regular weekly time by hand (Kick, no-schedule people)
+    /friend unschedule name    /friend hide name hidden   (keep someone off the calendar)
     /setup live-channel group channel                   where go-live posts go for a group
+    /setup calendar-channel group channel               where the weekly calendar + recap go
+    /calendar post [group]  a fresh calendar post now
   Owner only (answers only you can see)
     /status             Stream Core, the stream, this PC, the watcher
     /wake               Wake-on-LAN the stream PC
@@ -26,7 +31,9 @@ Commands answer "only you can see this" (ephemeral) unless they are meant for th
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
+import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -35,6 +42,7 @@ import discord
 from discord import app_commands
 
 from . import sysinfo, wol
+from .calendar import DAY_NAMES
 from .config import Settings
 from .core_link import CoreLink
 from .pings import KINDS, Pinger, length
@@ -47,6 +55,35 @@ NO_PINGS = discord.AllowedMentions.none()
 GROUP_COLOURS = {"flavr": 0xF72CA2, "friends": 0x2AE0D4}
 ENDED_COLOUR = 0x5B5F66
 PLATFORM_ICONS = {"youtube": "▶️ YouTube", "twitch": "🟣 Twitch", "kick": "🟢 Kick"}
+
+
+def parse_time(text: str) -> Optional[int]:
+    """"7 PM", "7:30pm", "19:30", "9" → minutes after midnight (None when unreadable)."""
+    m = re.fullmatch(r"\s*(\d{1,2})(?::(\d{2}))?\s*([ap]\.?m\.?)?\s*", (text or "").lower())
+    if not m:
+        return None
+    h, mins, ampm = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "")[:1]
+    if mins > 59 or h > 23 or (ampm and not 1 <= h <= 12):
+        return None
+    if ampm == "p" and h != 12:
+        h += 12
+    elif ampm == "a" and h == 12:
+        h = 0
+    return h * 60 + mins
+
+
+def make_embed(data: Dict[str, Any], picture: str = "") -> discord.Embed:
+    """flavrbot/calendar_post.py ``embed()`` data → a discord.Embed (with the attached picture)."""
+    e = discord.Embed(title=data["title"][:256], colour=data.get("colour") or GROUP_COLOURS["flavr"])
+    for name, value in data.get("fields") or []:
+        e.add_field(name=name[:256], value=value[:1024], inline=False)
+    if data.get("empty"):
+        e.description = "Nothing on the calendar yet this week."
+    if data.get("footer"):
+        e.set_footer(text=data["footer"][:2048])
+    if picture:
+        e.set_image(url=f"attachment://{picture}")
+    return e
 
 
 def ago(ts: Optional[float]) -> str:
@@ -87,15 +124,52 @@ class FlavrBot(discord.Client):
         self.pinger = pinger
         self.watcher = watcher
         self.tree = app_commands.CommandTree(self)
+        # the weekly calendar (flavrbot/calendar_post.py); set by flavrbot/__main__.py
+        self.calendar: Any = None
         # set once Discord says we're in; the go-live watcher waits for it so its first posts don't get lost
         self.ready_event = asyncio.Event()
         self._register()
 
     # ── helpers ────────────────────────────────────────────────────────
-    async def dm_owner(self, text: str) -> None:
-        """flavrbot/pings.py's ``send``: one DM to OWNER_ID."""
+    async def dm_owner(self, text: str, png: Optional[bytes] = None) -> None:
+        """flavrbot/pings.py's ``send`` (and the calendar pings, with the picture): one DM to OWNER_ID."""
         user = self.get_user(self.settings.owner_id) or await self.fetch_user(self.settings.owner_id)
-        await user.send(text, allowed_mentions=NO_PINGS)
+        files = [discord.File(io.BytesIO(png), filename="calendar.png")] if png else []
+        await user.send(text, files=files, allowed_mentions=NO_PINGS)
+
+    # ── calendar posts (flavrbot/calendar_post.py calls these) ─────────
+    async def cal_send(self, channel_id: str, data: Dict[str, Any], png: Optional[bytes], name: str) -> str:
+        """A new calendar / recap post; returns its message id ("" when it couldn't)."""
+        channel = self.get_channel(int(channel_id))
+        if channel is None:
+            return ""
+        files = [discord.File(io.BytesIO(png), filename=name)] if png else []
+        try:
+            msg = await channel.send(embed=make_embed(data, name if png else ""), files=files,
+                                     allowed_mentions=NO_PINGS)
+        except discord.HTTPException as e:
+            log.warning("calendar post failed: %s", e)
+            return ""
+        return str(msg.id)
+
+    async def cal_edit(self, channel_id: str, message_id: str, data: Dict[str, Any], png: Optional[bytes],
+                       name: str) -> bool:
+        """Edit a calendar post in place (new picture too). False when the post is gone."""
+        channel = self.get_channel(int(channel_id))
+        if channel is None:
+            return False
+        try:
+            msg = channel.get_partial_message(int(message_id))
+            kw: Dict[str, Any] = {"embed": make_embed(data, name if png else ""), "allowed_mentions": NO_PINGS}
+            if png:
+                kw["attachments"] = [discord.File(io.BytesIO(png), filename=name)]
+            await msg.edit(**kw)
+            return True
+        except discord.NotFound:
+            return False
+        except discord.HTTPException as e:
+            log.warning("calendar edit failed: %s", e)
+            return True         # a hiccup, not a deleted post: keep it and try again next change
 
     def is_owner_id(self, user: discord.abc.User) -> bool:
         return user.id == self.settings.owner_id
@@ -176,16 +250,9 @@ class FlavrBot(discord.Client):
         e.title = f"{person['name']} was live"
         e.colour = ENDED_COLOUR
         e.set_footer(text=f"Live for {length(float(session['ended_at']) - float(session['started_at']))}")
-        # the Twitch VOD, when there is one (YouTube's stream page becomes its VOD by itself)
-        tw = self.watcher.checkers.get("twitch")
-        acc = next((a for a in person.get("accounts") or [] if a["platform"] == "twitch" and a["platform_id"]), None)
-        if tw and acc:
-            try:
-                vod = await tw.last_vod(acc["platform_id"])
-                if vod and vod.get("url"):
-                    e.add_field(name="VOD", value=f"[Watch the Twitch VOD]({vod['url']})", inline=False)
-            except Exception:
-                log.info("Twitch VOD look-up failed", exc_info=True)
+        # the VOD the watcher found (flavrbot/watcher.py find_vod: Twitch archive / YouTube stream page)
+        if session.get("vod_url"):
+            e.add_field(name="VOD", value=f"[Watch the VOD]({session['vod_url']})", inline=False)
         await msg.edit(embed=e, allowed_mentions=NO_PINGS)
 
     # ── commands ───────────────────────────────────────────────────────
@@ -414,7 +481,88 @@ class FlavrBot(discord.Client):
                                               "Example line: `Lulu, youtube, @luluteala, flavr` (separate lines with ;).",
                                               ephemeral=True)
 
+        day_choices = [app_commands.Choice(name=d.title(), value=i) for i, d in enumerate(DAY_NAMES)]
+
+        @friend.command(name="schedule", description="A regular weekly stream time by hand (for the calendar)")
+        @app_commands.choices(day=day_choices)
+        @app_commands.describe(time="Like 7 PM or 19:30, in the bot's time zone (TZ)", title="Optional, e.g. the game")
+        async def friend_schedule(inter: discord.Interaction, name: str, day: app_commands.Choice[int], time: str,
+                                  title: Optional[str] = None):
+            if not await managers_only(inter):
+                return
+            p = bot.store.person(name)
+            minute = parse_time(time)
+            if not p or minute is None:
+                await inter.response.send_message(f"No one called {name}." if not p else
+                                                  "Couldn't read that time. Try 7 PM or 19:30.", ephemeral=True)
+                return
+            bot.store.add_manual(p["id"], day.value, minute, (title or "").strip()[:100])
+            if bot.calendar:
+                bot.calendar.poke()
+            await inter.response.send_message(f"{p['name']} is on the calendar every {day.name} at {time.strip()} "
+                                              f"({bot.settings.timezone}).", ephemeral=True)
+
+        @friend.command(name="unschedule", description="Remove someone's hand-set weekly times")
+        async def friend_unschedule(inter: discord.Interaction, name: str):
+            if not await managers_only(inter):
+                return
+            p = bot.store.person(name)
+            n = bot.store.clear_manual(p["id"]) if p else 0
+            if bot.calendar:
+                bot.calendar.poke()
+            await inter.response.send_message(f"Removed {n} weekly time(s) for {name}." if p else f"No one called {name}.",
+                                              ephemeral=True)
+
+        @friend.command(name="hide", description="Keep someone off the calendar and recap (still watched)")
+        async def friend_hide(inter: discord.Interaction, name: str, hidden: bool = True):
+            if not await managers_only(inter):
+                return
+            p = bot.store.person(name)
+            if not p:
+                await inter.response.send_message(f"No one called {name}.", ephemeral=True)
+                return
+            bot.store.set_hidden(p["id"], hidden)
+            if bot.calendar:
+                bot.calendar.poke()
+            await inter.response.send_message(f"{p['name']} is {'off' if hidden else 'back on'} the calendar.",
+                                              ephemeral=True)
+
         tree.add_command(friend)
+
+        calendar = app_commands.Group(name="calendar", description="The weekly stream calendar")
+        week_choices = [app_commands.Choice(name="This week", value=0), app_commands.Choice(name="Next week", value=1),
+                        app_commands.Choice(name="Last week (recap)", value=-1)]
+
+        @calendar.command(name="view", description="The calendar picture and list (only you see it)")
+        @app_commands.choices(group=group_choices, week=week_choices)
+        async def calendar_view(inter: discord.Interaction, group: Optional[app_commands.Choice[str]] = None,
+                                week: Optional[app_commands.Choice[int]] = None):
+            if not bot.calendar:
+                await inter.response.send_message("The calendar isn't running.", ephemeral=True)
+                return
+            await inter.response.defer(ephemeral=True, thinking=True)
+            from .calendar_post import embed as cal_embed
+            w, png = await bot.calendar.view_png(group.value if group else "flavr", week.value if week else 0)
+            name = "calendar.png"
+            files = [discord.File(io.BytesIO(png), filename=name)] if png else []
+            await inter.followup.send(embed=make_embed(cal_embed(w), name if png else ""), files=files,
+                                      ephemeral=True, allowed_mentions=NO_PINGS)
+
+        @calendar.command(name="post", description="Post a fresh calendar now (owner or Manage Server)")
+        @app_commands.choices(group=group_choices)
+        async def calendar_post_now(inter: discord.Interaction, group: Optional[app_commands.Choice[str]] = None):
+            if not await managers_only(inter):
+                return
+            g = group.value if group else "flavr"
+            if not bot.calendar or not bot.store.get(f"calendar_channel.{g}"):
+                await inter.response.send_message("Pick its channel first: /setup calendar-channel.", ephemeral=True)
+                return
+            await inter.response.defer(ephemeral=True, thinking=True)
+            async with bot.calendar._lock:
+                await bot.calendar.refresh(g, force_new=True)
+            await inter.followup.send("Posted.", ephemeral=True)
+
+        tree.add_command(calendar)
 
         setup = app_commands.Group(name="setup", description="Bot settings (owner or Manage Server)")
 
@@ -425,5 +573,17 @@ class FlavrBot(discord.Client):
                 return
             bot.store.put(f"live_channel.{group.value}", str(channel.id))
             await inter.response.send_message(f"{group.name} go-live posts go to {channel.mention}.", ephemeral=True)
+
+        @setup.command(name="calendar-channel", description="Where the weekly calendar and recap go")
+        @app_commands.choices(group=group_choices)
+        async def setup_calendar(inter: discord.Interaction, group: app_commands.Choice[str], channel: discord.TextChannel):
+            if not await managers_only(inter):
+                return
+            bot.store.put(f"calendar_channel.{group.value}", str(channel.id))
+            bot.store.put(f"calendar_post.{group.value}", {})       # a fresh post in the new channel
+            if bot.calendar:
+                bot.calendar.poke()
+            await inter.response.send_message(f"The {group.name} calendar goes to {channel.mention}; the first post "
+                                              "comes within a minute.", ephemeral=True)
 
         tree.add_command(setup)

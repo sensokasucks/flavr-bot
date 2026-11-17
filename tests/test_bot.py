@@ -13,10 +13,23 @@ async def test_commands_register():
     store = Store(":memory:")
     bot = FlavrBot(s, store, CoreLink(store, "k"), Pinger(store, None), Watcher(store, {}, {}))
     names = sorted(c.name for c in bot.tree.get_commands())
-    assert names == ["friend", "live", "pings", "points", "queue", "schedule", "setup", "status", "wake"]
+    assert names == ["calendar", "friend", "live", "pings", "points", "queue", "schedule", "setup", "status", "wake"]
     friend = next(c for c in bot.tree.get_commands() if c.name == "friend")
-    assert sorted(c.name for c in friend.commands) == ["add", "import", "list", "main", "remove"]
+    assert sorted(c.name for c in friend.commands) == ["add", "hide", "import", "list", "main", "remove",
+                                                       "schedule", "unschedule"]
+    setup = next(c for c in bot.tree.get_commands() if c.name == "setup")
+    assert sorted(c.name for c in setup.commands) == ["calendar-channel", "live-channel"]
     # every command's description fits Discord's 100-character limit
     for c in bot.tree.walk_commands():
         assert len(c.description) <= 100, c.name
     await bot.close()
+
+
+def test_parse_time():
+    from flavrbot.bot import parse_time
+    assert parse_time("7 PM") == 19 * 60
+    assert parse_time("7:30pm") == 19 * 60 + 30
+    assert parse_time("19:30") == 19 * 60 + 30
+    assert parse_time("12 am") == 0 and parse_time("12 PM") == 12 * 60
+    assert parse_time("9") == 9 * 60
+    assert parse_time("25:00") is None and parse_time("13 pm") is None and parse_time("soon") is None

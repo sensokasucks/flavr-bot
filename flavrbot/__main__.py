@@ -2,8 +2,9 @@
 Start FlaVR Bot: ``python -m flavrbot`` (the Docker image's command).
 
 Builds, in order: settings (environment), the database, the Stream Core link (web listener),
-phone pings, the go-live watcher with its platform checkers, then the Discord client, and runs
-them all on one event loop until the container stops.
+phone pings, the go-live watcher with its platform checkers, the Discord client, then the weekly
+calendar (its posts, and its pages on the same web listener), and runs them all on one event
+loop until the container stops.
 """
 
 from __future__ import annotations
@@ -18,13 +19,16 @@ import discord
 
 from . import config
 from .bot import FlavrBot
+from .calendar_post import CalendarPoster
 from .core_link import CoreLink
 from .pings import Pinger
 from .platforms.kick import Kick
 from .platforms.twitch import Twitch
 from .platforms.youtube import YouTube
+from .render import ImageCache, Screenshotter
 from .store import Store
 from .watcher import Watcher
+from .web import add_routes
 
 log = logging.getLogger("flavrbot")
 
@@ -60,16 +64,41 @@ async def main() -> int:
         link.on_alert = pinger.on_alert
         link.on_core_lost = pinger.core_lost
         link.on_core_back = pinger.core_back
-        watcher.on_start = bot.post_start
+        shooter = Screenshotter(s.chromium_path)
+        poster = CalendarPoster(store, bot, ImageCache(Path(s.data_dir) / "cache" / "img", http), shooter,
+                                tz=s.timezone, preview_hour=s.calendar_preview_hour, recap_hour=s.calendar_recap_hour,
+                                ping=lambda: pinger.switches().get("calendar", False), quiet=pinger.quiet_now,
+                                hold=lambda text: pinger.ping("calendar", text))
+        bot.calendar = poster
+        link.extra_routes.append(lambda app: add_routes(app, poster))
+
+        # go-live posts first, then a nudge so the calendar redraws within seconds
+        async def on_start(person, session, live_on):
+            out = await bot.post_start(person, session, live_on)
+            poster.poke()
+            return out
+
+        async def on_end(person, session):
+            await bot.post_end(person, session)
+            poster.poke()
+
+        watcher.on_start = on_start
         watcher.on_change = bot.post_change
-        watcher.on_end = bot.post_end
+        watcher.on_end = on_end
+        watcher.on_scheduled = poster.on_scheduled
 
         await link.start(s.listen_host, s.listen_port)
         async def watch(platform: str) -> None:
             await bot.ready_event.wait()        # posts need the Discord channels loaded
             await watcher.run_platform(platform)
 
-        tasks = [asyncio.create_task(pinger.run(), name="pings")]
+        async def after_ready(job):
+            await bot.ready_event.wait()        # posts need the Discord channels loaded
+            await job()
+
+        tasks = [asyncio.create_task(pinger.run(), name="pings"),
+                 asyncio.create_task(after_ready(poster.run), name="calendar"),
+                 asyncio.create_task(after_ready(watcher.run_schedules), name="schedules")]
         for platform, checker in checkers.items():
             if checker.ready:
                 tasks.append(asyncio.create_task(watch(platform), name=f"watch-{platform}"))
@@ -84,6 +113,7 @@ async def main() -> int:
             for t in tasks:
                 t.cancel()
             await link.stop()
+            await shooter.close()
             await bot.close()
     return 0
 

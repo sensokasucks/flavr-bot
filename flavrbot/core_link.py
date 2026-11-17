@@ -4,6 +4,8 @@ The Stream Core side door: Core (on the stream PC) sends what it knows to this b
   POST /core/push   Authorization: Bearer <FLAVR_CORE_KEY>
                     {"type": "hello" | "heartbeat" | "stream" | "alert" | "snapshot", "data": {...}, "at": unix s}
   GET  /health      {"ok": true}  (no password; Docker's health check)
+  GET  /calendar...  the weekly calendar page, picture and .ics feed (flavrbot/web.py, added
+                     through ``extra_routes`` by flavrbot/__main__.py)
 
 The sender is flavr-leftovers fridge-stream-core/core/companion_link.py; docs/CORE_LINK.md lists
 every message and field. Keep the three in sync.
@@ -55,6 +57,8 @@ class CoreLink:
         self.snapshot: Dict[str, Any] = store.get("core.snapshot", {}) or {}
         self.snapshot_at: Optional[float] = store.get("core.snapshot_at")
         self.refused = 0                        # pushes with a wrong password (shown on /status)
+        # more pages on the same port: each is called with the aiohttp app (flavrbot/web.py add_routes)
+        self.extra_routes: list[Callable[[web.Application], None]] = []
         self._runner: Optional[web.AppRunner] = None
         self._watch: Optional[asyncio.Task] = None
 
@@ -74,6 +78,8 @@ class CoreLink:
         app = web.Application(client_max_size=MAX_BODY)
         app.router.add_post("/core/push", self._push)
         app.router.add_get("/health", self._health)
+        for add in self.extra_routes:
+            add(app)
         return app
 
     async def _health(self, request: web.Request) -> web.Response:

@@ -9,8 +9,18 @@ Tables
             and the owner flag (the streamer themself, for /schedule).
   accounts  a person's channels: platform (twitch / youtube / kick), handle as typed, the
             platform's own id once looked up, and which one is their main platform.
-  sessions  each live stream the watcher saw: when, which platforms, title, the Discord post
-            it made (so it can edit it when the stream ends) and the VOD link if known.
+  sessions  each live stream the watcher saw: when, which platforms (and each one's link), title,
+            the Discord post it made (so it can edit it when the stream ends) and the VOD link
+            and picture once the stream is over (the calendar's "past" tiles).
+  scheduled upcoming streams the platforms told us about (Twitch schedule, YouTube waiting
+            rooms), one row per platform item. first_seen is when the bot first saw it, which the
+            recap's LATE NOTICE tag needs. Past rows are kept for that; future rows are replaced
+            on each refresh (flavrbot/watcher.py refresh_schedules / YouTube checks).
+  manual_schedule  regular weekly times set by hand with /friend schedule (Kick has no schedule
+            API; anyone else who doesn't use their platform's schedule).
+
+people.hidden (set with /friend hide) keeps someone off the calendar and recap; the go-live
+watcher still follows them.
 
 All calls are synchronous and quick; async code runs them with ``asyncio.to_thread`` where it
 matters (the watcher), or directly for single-row reads (commands).
@@ -67,7 +77,47 @@ CREATE TABLE IF NOT EXISTS sessions (
   post_message TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS sessions_person ON sessions(person_id, started_at);
+CREATE TABLE IF NOT EXISTS scheduled (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+  platform TEXT NOT NULL,
+  item_key TEXT NOT NULL,
+  at REAL NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  game TEXT NOT NULL DEFAULT '',
+  url TEXT NOT NULL DEFAULT '',
+  thumb TEXT NOT NULL DEFAULT '',
+  first_seen REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS scheduled_key ON scheduled(platform, item_key);
+CREATE INDEX IF NOT EXISTS scheduled_at ON scheduled(at);
+CREATE TABLE IF NOT EXISTS manual_schedule (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+  weekday INTEGER NOT NULL,
+  minute INTEGER NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  platform TEXT NOT NULL DEFAULT ''
+);
 """
+
+# Columns added after round 1. A database made by round 1 gets them on start (Store.__init__);
+# a new database gets them the same way, so SCHEMA above stays the round-1 shape.
+#   sessions.links      JSON {platform: url} of every platform the stream was on
+#   sessions.vod_url    the VOD (Twitch archive, the YouTube stream page) once it ended
+#   sessions.vod_thumb  its picture (Twitch VOD thumbnail, YouTube hqdefault)
+#   people.hidden       1 = left off the calendar and recap (/friend hide)
+ADDED_COLUMNS = (
+    ("sessions", "links", "TEXT NOT NULL DEFAULT '{}'"),
+    ("sessions", "vod_url", "TEXT NOT NULL DEFAULT ''"),
+    ("sessions", "vod_thumb", "TEXT NOT NULL DEFAULT ''"),
+    ("people", "hidden", "INTEGER NOT NULL DEFAULT 0"),
+)
+
+
+def _jsonable(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Lists / dicts (sessions.platforms, sessions.links) are stored as JSON text."""
+    return {k: json.dumps(v) if isinstance(v, (list, dict)) else v for k, v in fields.items()}
 
 
 class Store:
@@ -82,6 +132,10 @@ class Store:
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA foreign_keys = ON")
         self._db.executescript(SCHEMA)
+        for table, col, decl in ADDED_COLUMNS:
+            have = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
+            if col not in have:
+                self._db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
         self._db.commit()
 
     # ── kv ─────────────────────────────────────────────────────────────
@@ -135,6 +189,12 @@ class Store:
                              (platform_id, display, avatar, account_id))
             self._db.commit()
 
+    def set_hidden(self, person_id: int, hidden: bool) -> None:
+        """/friend hide: off the calendar and recap (still watched for go-live posts)."""
+        with self._lock:
+            self._db.execute("UPDATE people SET hidden=? WHERE id=?", (int(hidden), person_id))
+            self._db.commit()
+
     def set_main(self, person_id: int, platform: str) -> None:
         with self._lock:
             self._db.execute("UPDATE people SET main_platform=? WHERE id=?", (platform, person_id))
@@ -186,9 +246,7 @@ class Store:
         return dict(row) if row else None
 
     def start_session(self, person_id: int, now: float, **fields: Any) -> int:
-        cols = {"person_id": person_id, "started_at": now, "last_seen": now, **fields}
-        if isinstance(cols.get("platforms"), list):
-            cols["platforms"] = json.dumps(cols["platforms"])
+        cols = {"person_id": person_id, "started_at": now, "last_seen": now, **_jsonable(fields)}
         with self._lock:
             cur = self._db.execute(f"INSERT INTO sessions({', '.join(cols)}) VALUES({', '.join('?' * len(cols))})",
                                    tuple(cols.values()))
@@ -198,12 +256,20 @@ class Store:
     def update_session(self, sid: int, **fields: Any) -> None:
         if not fields:
             return
-        if isinstance(fields.get("platforms"), list):
-            fields["platforms"] = json.dumps(fields["platforms"])
+        fields = _jsonable(fields)
         with self._lock:
             self._db.execute(f"UPDATE sessions SET {', '.join(k + '=?' for k in fields)} WHERE id=?",
                              (*fields.values(), sid))
             self._db.commit()
+
+    def sessions_between(self, start: float, end: float, group: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Streams that STARTED in [start, end) (unix s), with name / group / hidden; the calendar's
+        past and live tiles. A stream past midnight stays on the day it started."""
+        with self._lock:
+            q = ("SELECT s.*, p.name, p.grp, p.hidden, p.main_platform FROM sessions s JOIN people p ON p.id=s.person_id "
+                 "WHERE s.started_at >= ? AND s.started_at < ?" + (" AND p.grp=?" if group else "") +
+                 " ORDER BY s.started_at")
+            return [dict(r) for r in self._db.execute(q, (start, end, group) if group else (start, end))]
 
     def live_now(self) -> List[Dict[str, Any]]:
         """Open sessions with the person's name / group, newest first (/live)."""
@@ -211,3 +277,63 @@ class Store:
             return [dict(r) for r in self._db.execute(
                 "SELECT s.*, p.name, p.grp FROM sessions s JOIN people p ON p.id=s.person_id "
                 "WHERE s.ended_at IS NULL ORDER BY s.started_at DESC")]
+
+    # ── scheduled streams (calendar) ───────────────────────────────────
+    def replace_scheduled(self, person_id: int, platform: str, items: List[Dict[str, Any]],
+                          now: Optional[float] = None) -> List[Dict[str, Any]]:
+        """The platform's current list of upcoming streams for one person.
+
+        ``items``: [{key, at, title, game, url, thumb}]. Future rows of this person + platform
+        that aren't in ``items`` any more are deleted (cancelled); past rows stay (the recap's
+        LATE NOTICE check needs them). Returns the rows that are NEW (for "Lulu scheduled Thu
+        7 PM" pings). first_seen keeps the time the bot first saw each one."""
+        now = time.time() if now is None else now
+        new: List[Dict[str, Any]] = []
+        with self._lock:
+            keys = [str(i["key"]) for i in items]
+            old = {r["item_key"] for r in self._db.execute(
+                "SELECT item_key FROM scheduled WHERE person_id=? AND platform=?", (person_id, platform))}
+            marks = ", ".join("?" * len(keys)) or "''"       # NOT IN () is a syntax error; '' matches nothing
+            self._db.execute(f"DELETE FROM scheduled WHERE person_id=? AND platform=? AND at > ? "
+                             f"AND item_key NOT IN ({marks})", (person_id, platform, now, *keys))
+            for i in items:
+                k = str(i["key"])
+                self._db.execute(
+                    "INSERT INTO scheduled(person_id, platform, item_key, at, title, game, url, thumb, first_seen) "
+                    "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(platform, item_key) DO UPDATE SET at=excluded.at, "
+                    "title=excluded.title, game=excluded.game, url=excluded.url, thumb=excluded.thumb",
+                    (person_id, platform, k, float(i["at"]), i.get("title") or "", i.get("game") or "",
+                     i.get("url") or "", i.get("thumb") or "", now))
+                if k not in old:
+                    new.append(dict(i))
+            self._db.commit()
+        return new
+
+    def scheduled_between(self, start: float, end: float, group: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            q = ("SELECT s.*, p.name, p.grp, p.hidden, p.main_platform FROM scheduled s "
+                 "JOIN people p ON p.id=s.person_id WHERE s.at >= ? AND s.at < ?" +
+                 (" AND p.grp=?" if group else "") + " ORDER BY s.at")
+            return [dict(r) for r in self._db.execute(q, (start, end, group) if group else (start, end))]
+
+    def add_manual(self, person_id: int, weekday: int, minute: int, title: str = "", platform: str = "") -> int:
+        """/friend schedule: every week on ``weekday`` (0 = Sunday ... 6 = Saturday) at ``minute``
+        after local midnight (TZ)."""
+        with self._lock:
+            cur = self._db.execute("INSERT INTO manual_schedule(person_id, weekday, minute, title, platform) "
+                                   "VALUES(?,?,?,?,?)", (person_id, weekday % 7, minute % 1440, title, platform))
+            self._db.commit()
+            return int(cur.lastrowid)
+
+    def clear_manual(self, person_id: int) -> int:
+        with self._lock:
+            cur = self._db.execute("DELETE FROM manual_schedule WHERE person_id=?", (person_id,))
+            self._db.commit()
+            return cur.rowcount
+
+    def manual(self, group: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            q = ("SELECT m.*, p.name, p.grp, p.hidden, p.main_platform FROM manual_schedule m "
+                 "JOIN people p ON p.id=m.person_id" + (" WHERE p.grp=?" if group else "") +
+                 " ORDER BY m.weekday, m.minute")
+            return [dict(r) for r in self._db.execute(q, (group,) if group else ())]

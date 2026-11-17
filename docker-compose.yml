@@ -27,6 +27,9 @@ services:
       QUIET_HOURS: ${QUIET_HOURS:-3-11}
       BIG_TIP: ${BIG_TIP:-20}
       BIG_GIFT: ${BIG_GIFT:-10}
+      CALENDAR_PREVIEW_HOUR: ${CALENDAR_PREVIEW_HOUR:-10}
+      CALENDAR_RECAP_HOUR: ${CALENDAR_RECAP_HOUR:-23}
+      CHROMIUM_PATH: ${CHROMIUM_PATH:-}
     volumes:
       - flavr-bot-data:/data
 

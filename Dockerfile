@@ -4,11 +4,17 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    DATA_DIR=/data
+    DATA_DIR=/data \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# Chromium for the calendar picture (+ its system libraries), and fonts for stream titles in
+# other scripts (Japanese, Korean, Chinese) and emoji. About 600 MB; built once per update.
+RUN playwright install --with-deps chromium \
+ && apt-get update && apt-get install -y --no-install-recommends fonts-dejavu-core fonts-noto-cjk fonts-noto-color-emoji \
+ && rm -rf /var/lib/apt/lists/*
 COPY flavrbot ./flavrbot
 
 # the bot's database lives here (a named volume in docker-compose.yml, so redeploys keep it)

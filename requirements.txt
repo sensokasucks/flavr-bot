@@ -1,0 +1,4 @@
+# FlaVR Bot runtime (Python 3.12). aiohttp comes with discord.py.
+discord.py==2.5.2
+# zoneinfo needs time zone data; slim Docker images don't ship it
+tzdata==2025.2

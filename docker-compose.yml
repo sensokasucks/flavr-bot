@@ -1,0 +1,34 @@
+# FlaVR Bot stack. Portainer: Stacks → Add stack → Repository → this repo, compose path
+# docker-compose.yml; put the settings from .env.example under "Environment variables".
+# Full steps: docs/PORTAINER.md.
+services:
+  flavr-bot:
+    build: .
+    image: flavr-bot:latest
+    container_name: flavr-bot
+    restart: unless-stopped
+    # host network: /wake's Wake-on-LAN broadcast must reach the home network, and Stream Core on
+    # the stream PC reaches the bot at this PC's own address (port LISTEN_PORT, default 3870)
+    network_mode: host
+    environment:
+      DISCORD_TOKEN: ${DISCORD_TOKEN:-}
+      OWNER_ID: ${OWNER_ID:-}
+      GUILD_ID: ${GUILD_ID:-}
+      FLAVR_CORE_KEY: ${FLAVR_CORE_KEY:-}
+      LISTEN_PORT: ${LISTEN_PORT:-3870}
+      STREAM_PC_MAC: ${STREAM_PC_MAC:-}
+      WOL_BROADCAST: ${WOL_BROADCAST:-255.255.255.255}
+      TWITCH_CLIENT_ID: ${TWITCH_CLIENT_ID:-}
+      TWITCH_CLIENT_SECRET: ${TWITCH_CLIENT_SECRET:-}
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+      KICK_CLIENT_ID: ${KICK_CLIENT_ID:-}
+      KICK_CLIENT_SECRET: ${KICK_CLIENT_SECRET:-}
+      TZ: ${TZ:-America/New_York}
+      QUIET_HOURS: ${QUIET_HOURS:-3-11}
+      BIG_TIP: ${BIG_TIP:-20}
+      BIG_GIFT: ${BIG_GIFT:-10}
+    volumes:
+      - flavr-bot-data:/data
+
+volumes:
+  flavr-bot-data:

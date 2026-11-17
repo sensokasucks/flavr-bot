@@ -271,6 +271,27 @@ class Store:
                  " ORDER BY s.started_at")
             return [dict(r) for r in self._db.execute(q, (start, end, group) if group else (start, end))]
 
+    def merge_overlaps(self) -> int:
+        """Fold together sessions of one person that overlap in time (a stream counted twice:
+        the watcher ended it while a platform hadn't been checked, then saw it again with its
+        real, earlier start). The LATER row is kept (its Discord post is the current one) and
+        takes the earlier start; the earlier row is deleted. Called once at start-up
+        (flavrbot/__main__.py). Returns how many rows were folded."""
+        folded = 0
+        with self._lock:
+            rows = [dict(r) for r in self._db.execute("SELECT * FROM sessions ORDER BY person_id, started_at, id")]
+            for a, b in zip(rows, rows[1:]):
+                if a["person_id"] != b["person_id"] or a["ended_at"] is None or b["started_at"] >= a["ended_at"]:
+                    continue
+                self._db.execute("UPDATE sessions SET started_at=?, restarts=MAX(restarts, ?), "
+                                 "ended_at=CASE WHEN ended_at IS NULL THEN NULL ELSE MAX(ended_at, ?) END WHERE id=?",
+                                 (min(a["started_at"], b["started_at"]), a["restarts"], a["ended_at"], b["id"]))
+                self._db.execute("DELETE FROM sessions WHERE id=?", (a["id"],))
+                b["started_at"] = min(a["started_at"], b["started_at"])
+                folded += 1
+            self._db.commit()
+        return folded
+
     def live_now(self) -> List[Dict[str, Any]]:
         """Open sessions with the person's name / group, newest first (/live)."""
         with self._lock:

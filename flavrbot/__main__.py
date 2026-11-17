@@ -42,6 +42,9 @@ async def main() -> int:
     if not s.discord_token or not s.owner_id:
         return 2                # nothing works without these; the log says what to set
     store = Store(Path(s.data_dir) / "flavr_bot.db")
+    folded = store.merge_overlaps()         # streams counted twice by an older version (or a long outage)
+    if folded:
+        log.info("Merged %d stream(s) that had been counted twice", folded)
     link = CoreLink(store, s.core_key, late_sec=s.heartbeat_late_sec)
 
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as http:

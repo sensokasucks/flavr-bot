@@ -9,6 +9,8 @@ Kinds (each can be switched with /pings; the defaults are in KINDS):
   raid     a raid came in
   money    a big tip / Super Chat (BIG_TIP or more) or a big sub gift (BIG_GIFT subs or more)
   friends  someone the go-live watcher follows went live (sent as one list every 10 minutes)
+  calendar the weekly calendar changed: new schedules, go-lives, ends, new week / recap posted
+           (collected for 10 minutes, sent with the picture; flavrbot/calendar_post.py)
 
 Quiet hours (QUIET_HOURS, default 3-11 in TZ): ordinary pings wait and arrive as one message
 when quiet hours end. URGENT pings always go at once. While Core says you're live, quiet hours
@@ -40,6 +42,7 @@ KINDS: Dict[str, Tuple[str, bool]] = {
     "raid": ("Raids", True),
     "money": ("Big tips, Super Chats and sub gifts", True),
     "friends": ("Friends going live (every 10 minutes, in one message)", False),
+    "calendar": ("Calendar changes, with the new picture (every 10 minutes at most)", True),
 }
 FRIENDS_EVERY = 600.0
 # Core's alert kinds (core/alerts.py KINDS in flavr-leftovers): real money, and sub gifts with a qty

@@ -15,6 +15,15 @@ answers per PERSON, not per channel:
 The main platform (the link and picture a post shows) is the person's own pick, else the first
 live one of YouTube, Twitch, Kick.
 
+Each finished stream gets its VOD looked up (``find_vod``: the Twitch archive, or the YouTube
+stream page itself, which becomes the VOD) before ``on_end`` runs, so the post and the weekly
+calendar can link it.
+
+Upcoming streams for the calendar: ``refresh_schedules`` asks Twitch's schedule API for every
+Twitch account every SCHEDULE_EVERY (6 h), and each YouTube check saves the waiting rooms it
+found. Both land in the ``scheduled`` table; ``on_scheduled(person, item)`` is called for each
+item the bot hadn't seen before (flavrbot/calendar_post.py turns those into calendar pings).
+
 What happens on a change is the bot's business (flavrbot/bot.py ``LivePoster``): ``on_start``
 posts in the person's group channel and returns where, ``on_change`` edits it when the
 platforms or title change, ``on_end`` edits it to "was live" with the length and VOD. Sessions
@@ -33,11 +42,21 @@ from .store import PLATFORMS, Store
 
 log = logging.getLogger("flavrbot.watcher")
 RESTART_GRACE = 15 * 60.0
+SCHEDULE_EVERY = 6 * 3600.0     # Twitch schedule look-ups: one call per Twitch account this often
 
 # on_start(person, session, infos) -> (channel id, message id) or ("", "")
 OnStart = Callable[[Dict[str, Any], Dict[str, Any], Dict[str, Dict[str, Any]]], Awaitable[Tuple[str, str]]]
 OnChange = Callable[[Dict[str, Any], Dict[str, Any], Dict[str, Dict[str, Any]]], Awaitable[None]]
 OnEnd = Callable[[Dict[str, Any], Dict[str, Any]], Awaitable[None]]
+# on_scheduled(person, item): a newly seen upcoming stream {key, at, title, game, url, thumb, platform}
+OnScheduled = Callable[[Dict[str, Any], Dict[str, Any]], Awaitable[None]]
+
+
+def youtube_id(url: str) -> str:
+    """"https://www.youtube.com/watch?v=abc12345678" → "abc12345678" ("" when it isn't one)."""
+    if "watch?v=" not in (url or ""):
+        return ""
+    return url.split("watch?v=", 1)[1].split("&", 1)[0]
 
 
 def main_platform(person: Dict[str, Any], live_on: Dict[str, Any]) -> str:
@@ -62,6 +81,7 @@ class Watcher:
         self.on_start: Optional[OnStart] = None
         self.on_change: Optional[OnChange] = None
         self.on_end: Optional[OnEnd] = None
+        self.on_scheduled: Optional[OnScheduled] = None
         self._lock = asyncio.Lock()
         # people whose open session saw no platform live at the last merge (a possible restart)
         self._gone: set[int] = set()
@@ -94,7 +114,84 @@ class Watcher:
             self.errors[platform] = str(e) or type(e).__name__
             log.warning("%s check failed: %s", platform.title(), self.errors[platform])
             return
+        if platform == "youtube":
+            # the same check found the waiting rooms (scheduled streams); save them for the calendar
+            upcoming = getattr(checker, "upcoming", {}) or {}
+            for a in accounts:
+                items = [dict(i, key=i.get("video_id") or i.get("url")) for i in upcoming.get(a["platform_id"], [])
+                         if i.get("at")]
+                await self._save_scheduled(a["person_id"], "youtube", items)
         await self.reconcile()
+
+    async def _save_scheduled(self, person_id: int, platform: str, items: List[Dict[str, Any]]) -> None:
+        new = self.store.replace_scheduled(person_id, platform, items, now=self.clock())
+        if not new or not self.on_scheduled:
+            return
+        person = next((p for p in self.store.people() if p["id"] == person_id), None)
+        for item in new:
+            if person and float(item["at"]) > self.clock():
+                try:
+                    await self.on_scheduled(person, {**item, "platform": platform})
+                except Exception:
+                    log.exception("on_scheduled failed")
+
+    async def refresh_schedules(self) -> None:
+        """Twitch schedules of everyone followed (YouTube's come with each YouTube check)."""
+        tw = self.checkers.get("twitch")
+        if not tw or not getattr(tw, "ready", True) or not hasattr(tw, "schedule"):
+            return
+        for a in [a for a in self.store.accounts("twitch") if a["platform_id"]]:
+            try:
+                segs = await tw.schedule(a["platform_id"], limit=10)
+            except Exception as e:
+                log.info("Twitch schedule for %s failed: %s", a["handle"], e)
+                continue
+            items = [dict(s, key=s.get("key") or f"{a['platform_id']}:{int(s['at'])}",
+                          url=s.get("url") or f"https://twitch.tv/{a['handle'].lstrip('@')}")
+                     for s in segs if s.get("at")]
+            await self._save_scheduled(a["person_id"], "twitch", items)
+
+    async def run_schedules(self) -> None:
+        """Background task (flavrbot/__main__.py): refresh_schedules every SCHEDULE_EVERY."""
+        while True:
+            try:
+                await self.refresh_schedules()
+            except Exception:
+                log.exception("schedule refresh failed")
+            await asyncio.sleep(SCHEDULE_EVERY)
+
+    async def find_vod(self, person: Dict[str, Any], session: Dict[str, Any]) -> Tuple[str, str]:
+        """(VOD link, VOD picture) of a finished stream, trying the person's main platform first.
+
+        YouTube: the stream's own page is its VOD (picture: hqdefault.jpg). Twitch: the newest
+        archive video (Helix videos). Kick has no VOD API: its channel's videos page, no picture."""
+        try:
+            links = json.loads(session.get("links") or "{}") if isinstance(session.get("links"), str) \
+                else dict(session.get("links") or {})
+        except ValueError:
+            links = {}
+        order = sorted(links, key=lambda p: (p != (person.get("main_platform") or "youtube"), PLATFORMS.index(p)
+                                             if p in PLATFORMS else 9))
+        for p in order:
+            if p == "youtube":
+                vid = youtube_id(links[p])
+                if vid:
+                    return links[p], f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+            elif p == "twitch" and "twitch" in self.checkers and hasattr(self.checkers["twitch"], "last_vod"):
+                acc = next((a for a in person.get("accounts") or [] if a["platform"] == "twitch" and a["platform_id"]), None)
+                if acc:
+                    try:
+                        vod = await self.checkers["twitch"].last_vod(acc["platform_id"])
+                    except Exception as e:
+                        log.info("Twitch VOD look-up failed: %s", e)
+                        vod = None
+                    # only a VOD made at about this stream's start (not an older one)
+                    if vod and vod.get("url") and abs(float(vod.get("created_at") or session["started_at"])
+                                                      - float(session["started_at"])) < 3 * 3600:
+                        return vod["url"], vod.get("thumb") or ""
+            elif p == "kick" and links[p]:
+                return links[p].rstrip("/") + "/videos", ""
+        return "", ""
 
     async def run_platform(self, platform: str) -> None:
         while True:
@@ -126,6 +223,7 @@ class Watcher:
             main = main_platform(person, live_on)
             info = live_on[main]
             fields = {"last_seen": now, "platforms": sorted(live_on, key=PLATFORMS.index), "title": info.get("title", ""),
+                      "links": {p: i.get("url", "") for p, i in live_on.items()},
                       "url": info.get("url", ""), "thumb": info.get("thumb", ""), "game": info.get("game", ""),
                       "viewers": sum(int(i.get("viewers") or 0) for i in live_on.values())}
             if open_s:
@@ -151,9 +249,11 @@ class Watcher:
             self._gone.add(person["id"])        # offline for now; a comeback counts as a restart
         elif open_s:
             self._gone.discard(person["id"])
-            self.store.update_session(open_s["id"], ended_at=float(open_s["last_seen"]))
+            ended = {"ended_at": float(open_s["last_seen"])}
+            ended["vod_url"], ended["vod_thumb"] = await self.find_vod(person, open_s)
+            self.store.update_session(open_s["id"], **ended)
             if self.on_end:
-                await self.on_end(person, {**open_s, "ended_at": float(open_s["last_seen"])})
+                await self.on_end(person, {**open_s, **ended})
 
     # ── reading (/live, /schedule, /status) ────────────────────────────
     def status(self) -> Dict[str, Any]:

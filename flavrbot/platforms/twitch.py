@@ -6,7 +6,9 @@ Calls (all documented Helix endpoints):
   POST id.twitch.tv/oauth2/token            client_credentials → app token (about 60 days; renewed on 401)
   GET  helix/users?login=a&login=b          up to 100 per call: id, display name, picture
   GET  helix/streams?user_id=..&type=live   up to 100 per call: who is live, title, game, viewers, start
-  GET  helix/schedule?broadcaster_id=       one person's upcoming segments (/schedule)
+  GET  helix/schedule?broadcaster_id=       one person's upcoming segments (/schedule, the calendar
+                                            every 6 h: flavrbot/watcher.py refresh_schedules)
+  GET  helix/games?id=a&id=b                box art of the scheduled games (calendar tiles)
   GET  helix/videos?user_id=&type=archive   the newest VOD after a stream ends
 
 Rate: Helix allows 800 points a minute for an app; the watcher uses one streams call per 100
@@ -110,15 +112,34 @@ class Twitch:
         return out
 
     async def schedule(self, platform_id: str, limit: int = 5) -> List[Dict[str, Any]]:
-        """Upcoming schedule segments (Twitch answers 404 when the channel has no schedule)."""
+        """Upcoming schedule segments (Twitch answers 404 when the channel has no schedule).
+
+        Each: {key (segment id; a repeating slot's id differs per week), at, title, game,
+        thumb (the game's box art, "" when no category), platform}."""
         try:
             data = await self._get("/schedule", [("broadcaster_id", platform_id), ("first", str(limit))])
         except RuntimeError:
             return []
-        segs = ((data.get("data") or {}).get("segments")) or []
-        return [{"title": str(s.get("title") or ""), "at": iso_ts(str(s.get("start_time") or "")),
-                 "game": str((s.get("category") or {}).get("name") or ""), "platform": "twitch"}
-                for s in segs if not s.get("canceled_until")]
+        segs = [s for s in ((data.get("data") or {}).get("segments")) or [] if not s.get("canceled_until")]
+        art = await self.box_art([str((s.get("category") or {}).get("id") or "") for s in segs])
+        return [{"key": str(s.get("id") or ""), "title": str(s.get("title") or ""),
+                 "at": iso_ts(str(s.get("start_time") or "")),
+                 "game": str((s.get("category") or {}).get("name") or ""),
+                 "thumb": art.get(str((s.get("category") or {}).get("id") or ""), ""), "platform": "twitch"}
+                for s in segs]
+
+    async def box_art(self, game_ids: List[str]) -> Dict[str, str]:
+        """{game id: box art URL at 285 x 380} for the calendar's scheduled tiles."""
+        ids = sorted({i for i in game_ids if i})
+        out: Dict[str, str] = {}
+        for part in chunks(ids, 100):
+            try:
+                data = await self._get("/games", [("id", i) for i in part])
+            except RuntimeError:
+                continue
+            for g in data.get("data") or []:
+                out[str(g.get("id"))] = str(g.get("box_art_url") or "").replace("{width}", "285").replace("{height}", "380")
+        return out
 
     async def last_vod(self, platform_id: str) -> Optional[Dict[str, Any]]:
         try:
@@ -130,4 +151,5 @@ class Twitch:
             return None
         v = rows[0]
         return {"url": str(v.get("url") or ""), "title": str(v.get("title") or ""),
+                "created_at": iso_ts(str(v.get("created_at") or "")),
                 "thumb": str(v.get("thumbnail_url") or "").replace("%{width}", "640").replace("%{height}", "360")}

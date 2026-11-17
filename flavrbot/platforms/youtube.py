@@ -32,7 +32,9 @@ FEED = "https://www.youtube.com/feeds/videos.xml?channel_id="
 NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015",
       "media": "http://search.yahoo.com/mrss/"}
 CHANNEL_ID = re.compile(r"^UC[\w-]{22}$")
-FRESH_DAYS = 3          # only videos the feed says are this new can be live / upcoming soon
+# Only feed videos this new are asked about. Waiting rooms are often made weeks ahead, so this
+# is long; every video is asked about once and remembered (_done) once it's over or an upload.
+FRESH_DAYS = 45
 
 
 def parse_feed(xml_text: str) -> List[Dict[str, Any]]:
@@ -139,7 +141,8 @@ class YouTube:
                 elif state == "upcoming":
                     upcoming.setdefault(cid, []).append({
                         "title": str(sn.get("title") or ""), "at": iso_ts(str(ld.get("scheduledStartTime") or "")),
-                        "url": f"https://www.youtube.com/watch?v={vid}", "platform": "youtube"})
+                        "url": f"https://www.youtube.com/watch?v={vid}", "platform": "youtube", "video_id": vid,
+                        "thumb": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg", "game": ""})
                 else:
                     self._done.add(vid)       # an upload or a finished stream: never ask again
         self.upcoming = upcoming

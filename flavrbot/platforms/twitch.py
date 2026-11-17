@@ -18,6 +18,7 @@ people every TWITCH_EVERY_SEC (default 2 minutes).
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -39,6 +40,14 @@ def iso_ts(s: str) -> Optional[float]:
         return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
+
+
+def duration_sec(s: str) -> float:
+    """Helix video duration "3h2m1s" / "45m" / "12s" → seconds (0 when unreadable)."""
+    total = 0.0
+    for n, unit in re.findall(r"(\d+)([hms])", s or ""):
+        total += int(n) * {"h": 3600, "m": 60, "s": 1}[unit]
+    return total
 
 
 def chunks(items: List[Any], n: int) -> List[List[Any]]:
@@ -153,3 +162,22 @@ class Twitch:
         return {"url": str(v.get("url") or ""), "title": str(v.get("title") or ""),
                 "created_at": iso_ts(str(v.get("created_at") or "")),
                 "thumb": str(v.get("thumbnail_url") or "").replace("%{width}", "640").replace("%{height}", "360")}
+
+    async def past_streams(self, platform_id: str, since: float, until: float) -> List[Dict[str, Any]]:
+        """Finished streams that started in [since, until), from the channel's past broadcasts
+        (Helix /videos type=archive, 1 call of up to 100). Used by Watcher.backfill to fill weeks
+        the bot wasn't watching. Twitch deletes these after 7 days (60 for partners, Turbo, Prime),
+        so older weeks can come back partly empty. → [{started_at, ended_at, title, url, thumb}]"""
+        data = await self._get("/videos", [("user_id", platform_id), ("type", "archive"), ("first", "100")])
+        out = []
+        for v in data.get("data") or []:
+            start = iso_ts(str(v.get("created_at") or ""))
+            length = duration_sec(str(v.get("duration") or ""))
+            if start is None or not (since <= start < until) or length <= 0:
+                continue
+            thumb = str(v.get("thumbnail_url") or "")
+            out.append({"started_at": start, "ended_at": start + length, "title": str(v.get("title") or ""),
+                        "url": str(v.get("url") or ""),
+                        # a VOD still being made has a placeholder picture with no size in it
+                        "thumb": thumb.replace("%{width}", "640").replace("%{height}", "360") if "%{width}" in thumb else ""})
+        return out

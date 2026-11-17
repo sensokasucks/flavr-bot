@@ -19,7 +19,7 @@ Rules (from the plan doc, decided with the owner):
   * the same person scheduled on several platforms within MERGE_WINDOW = one tile with several
     badges (multistream);
   * LATE NOTICE (recap only): a stream with no scheduled item seen at least LATE_NOTICE before it
-    started;
+    started (never for streams filled in from VODs: nobody was looking for schedules then);
   * people marked hidden (/friend hide) are left out.
 
 Times are unix seconds everywhere; ``tz`` is a ZoneInfo (Settings.timezone).
@@ -61,6 +61,7 @@ class Tile:
     restarts: int = 0
     late: bool = False
     person_id: int = 0
+    from_vod: bool = False          # filled in afterwards from the platform (Watcher.backfill)
 
     @property
     def key(self) -> str:
@@ -168,7 +169,8 @@ def build_week(store: Store, group: str, start: datetime, now: float, tz: ZoneIn
             url=(s.get("url") if live else (s.get("vod_url") or s.get("url"))) or "",
             thumb=(s.get("thumb") if live else (s.get("vod_thumb") or s.get("thumb"))) or "",
             avatar=avatar.get(s["person_id"], ""), platforms=json.loads(s.get("platforms") or "[]"),
-            links=links, viewers=int(s.get("viewers") or 0), restarts=int(s.get("restarts") or 0)))
+            links=links, viewers=int(s.get("viewers") or 0), restarts=int(s.get("restarts") or 0),
+            from_vod=s.get("source") == "vod"))
 
     # every scheduled item (platform + by hand), for this week and the LATE NOTICE check
     sched = [dict(r) for r in store.scheduled_between(a - 86400, b, group) if r["person_id"] in ids]
@@ -185,7 +187,8 @@ def build_week(store: Store, group: str, start: datetime, now: float, tz: ZoneIn
         for t in tiles:
             ahead = [x for x in sched if x["person_id"] == t.person_id and abs(float(x["at"]) - t.at) < MATCH_WINDOW
                      and float(x["first_seen"]) <= t.at - LATE_NOTICE]
-            t.late = not ahead
+            # a stream filled in from its VOD had no watcher looking for schedules then: never "late"
+            t.late = not ahead and not t.from_vod
     else:
         started = [(t.person_id, t.at) for t in tiles]
         merged: List[Tile] = []

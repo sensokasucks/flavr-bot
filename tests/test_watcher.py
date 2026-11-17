@@ -86,7 +86,7 @@ async def test_restart_inside_grace_and_end_after():
     await w.check("twitch")
     assert log[-1] == ("end", "Sensoka", 10_600.0)              # ended at the last sighting
     clock["t"] += 60
-    ch["twitch"].now = {"sensoka": live()}
+    ch["twitch"].now = {"sensoka": live(started=clock["t"])}   # a new stream has its own, later start time
     await w.check("twitch")                                     # later: a new stream
     assert log[-1][0] == "start"
     assert len(store.live_now()) == 1
@@ -141,3 +141,37 @@ def test_magic_packet():
         raise AssertionError("should refuse")
     except ValueError:
         pass
+
+
+async def test_bot_restart_mid_stream_doesnt_count_twice():
+    """A redeploy longer than RESTART_GRACE: Twitch answers first, YouTube later (the Amanda case)."""
+    store, ch, clock, w, log = setup()
+    ch["youtube"].now = {"luluteala": live(started=9_900.0, url="yt")}
+    await w.check("youtube")
+    # the bot is down for 20 minutes, then a NEW watcher (memory lost) checks Twitch first
+    w2 = Watcher(store, ch, {}, clock=lambda: clock["t"])
+    w2.on_start, w2.on_change, w2.on_end = w.on_start, w.on_change, w.on_end
+    clock["t"] += 20 * 60
+    await w2.check("twitch")
+    assert [e[0] for e in log] == ["start"]                     # not ended: YouTube not asked yet
+    await w2.check("youtube")
+    assert [e[0] for e in log] == ["start", "change"]           # same session, still one
+    assert len(store.live_now()) == 1
+
+
+async def test_reopen_and_merge_overlapping_sessions():
+    store, ch, clock, w, log = setup()
+    lulu = store.person("Lulu")["id"]
+    # an older version ended the stream at 10,600, then made a new one starting at 9,900 (real start)
+    a = store.start_session(lulu, 9_900.0, platforms=["youtube"])
+    store.update_session(a, ended_at=10_600.0, restarts=1)
+    store.start_session(lulu, 9_900.0, platforms=["youtube"], post_message="new")
+    assert store.merge_overlaps() == 1
+    rows = store.live_now()
+    assert len(rows) == 1 and rows[0]["post_message"] == "new" and rows[0]["restarts"] == 1
+    assert store.merge_overlaps() == 0
+    # and the watcher reopens an ended session instead of starting a second one
+    store.update_session(rows[0]["id"], ended_at=10_600.0)
+    ch["youtube"].now = {"luluteala": live(started=9_900.0, url="yt")}
+    await w.check("youtube")
+    assert len(store.live_now()) == 1 and log[-1][0] == "change"

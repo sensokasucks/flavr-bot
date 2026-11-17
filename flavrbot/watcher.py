@@ -10,7 +10,13 @@ answers per PERSON, not per channel:
   * offline on every platform for less than RESTART_GRACE (15 min) and back = the same session
     ("1 restart"), so a crashed OBS doesn't post twice;
   * the session ends RESTART_GRACE after the last time any platform said live, and its end time
-    is that last sighting (not when the watcher noticed).
+    is that last sighting (not when the watcher noticed). It only ends once every platform the
+    person streams on (and that has keys) has been checked AFTER that last sighting: right after
+    the bot starts, Twitch may answer minutes before YouTube, and "not on Twitch" must not end a
+    YouTube stream that simply hasn't been looked at yet (a long redeploy did exactly that);
+  * a "new" stream whose platform start time is before the person's last stream ended is that
+    same stream: the old session is reopened instead of a second one being made
+    (``merge_overlaps`` in flavrbot/store.py also folds such pairs together once at start-up).
 
 The main platform (the link and picture a post shows) is the person's own pick, else the first
 live one of YouTube, Twitch, Kick.
@@ -238,6 +244,15 @@ class Watcher:
                     await self.on_change(person, {**open_s, **fields}, live_on)
                 return
             started = min([float(i["started_at"]) for i in live_on.values() if i.get("started_at")] or [now])
+            last = self.store.last_session(person["id"])
+            if last and last.get("ended_at") is not None and started < float(last["ended_at"]):
+                # the platform says this stream began before the last one "ended": it never did end
+                # (missed while the bot was down / a platform hadn't been checked yet). Reopen it.
+                fields.update(ended_at=None, vod_url="", vod_thumb="")
+                self.store.update_session(last["id"], **fields)
+                if self.on_change:
+                    await self.on_change(person, {**last, **fields}, live_on)
+                return
             sid = self.store.start_session(person["id"], started, **{k: v for k, v in fields.items() if k != "last_seen"})
             self.store.update_session(sid, last_seen=now)
             session = {**fields, "id": sid, "started_at": started, "restarts": 0}
@@ -245,7 +260,8 @@ class Watcher:
                 channel, message = await self.on_start(person, session, live_on)
                 if message:
                     self.store.update_session(sid, post_channel=str(channel), post_message=str(message))
-        elif open_s and now - float(open_s["last_seen"]) < RESTART_GRACE:
+        elif open_s and (now - float(open_s["last_seen"]) < RESTART_GRACE
+                         or not self._all_checked_since(person, float(open_s["last_seen"]))):
             self._gone.add(person["id"])        # offline for now; a comeback counts as a restart
         elif open_s:
             self._gone.discard(person["id"])
@@ -254,6 +270,14 @@ class Watcher:
             self.store.update_session(open_s["id"], **ended)
             if self.on_end:
                 await self.on_end(person, {**open_s, **ended})
+
+    def _all_checked_since(self, person: Dict[str, Any], since: float) -> bool:
+        """Has every platform this person streams on (with a working checker) answered after ``since``?"""
+        for a in person.get("accounts") or []:
+            c = self.checkers.get(a["platform"])
+            if c is not None and getattr(c, "ready", True) and self.last_check.get(a["platform"], 0) <= since:
+                return False
+        return True
 
     # ── reading (/live, /schedule, /status) ────────────────────────────
     def status(self) -> Dict[str, Any]:

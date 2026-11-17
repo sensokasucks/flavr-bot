@@ -2,7 +2,8 @@
 Start FlaVR Bot: ``python -m flavrbot`` (the Docker image's command).
 
 Builds, in order: settings (environment), the database, the Stream Core link (web listener),
-phone pings, the go-live watcher with its platform checkers, the Discord client, then the weekly
+phone pings, the go-live watcher with its platform checkers, the Discord client (after reading which
+privileged intents the developer portal allows) with server care, then the weekly
 calendar (its posts, and its pages on the same web listener), and runs them all on one event
 loop until the container stops.
 """
@@ -26,6 +27,7 @@ from .platforms.kick import Kick
 from .platforms.twitch import Twitch
 from .platforms.youtube import YouTube
 from .render import ImageCache, Screenshotter
+from .server_care import gateway_intents
 from .store import Store
 from .watcher import Watcher
 from .web import add_routes
@@ -62,7 +64,12 @@ async def main() -> int:
         pinger = Pinger(store, send, tz=s.timezone, quiet=s.quiet_hours, big_tip=s.big_tip, big_gift=s.big_gift,
                         live=link.stream_live)
         pinger.load_quiet()         # quiet hours changed with /pings quiet win over QUIET_HOURS
-        bot = FlavrBot(s, store, link, pinger, watcher)
+        # which privileged Discord switches are on (asking for one that's off stops the connection)
+        gateway = await gateway_intents(http, s.discord_token)
+        for key, label in (("content", "Message Content"), ("members", "Server Members")):
+            if not gateway[key]:
+                log.warning("%s Intent is off in the developer portal: server care runs with less (see /setup check)", label)
+        bot = FlavrBot(s, store, link, pinger, watcher, gateway=gateway)
         link.on_stream = pinger.on_stream
         link.on_alert = pinger.on_alert
         link.on_core_lost = pinger.core_lost
@@ -109,7 +116,8 @@ async def main() -> int:
         tasks = [asyncio.create_task(pinger.run(), name="pings"),
                  asyncio.create_task(after_ready(fill_in), name="backfill"),
                  asyncio.create_task(after_ready(poster.run), name="calendar"),
-                 asyncio.create_task(after_ready(watcher.run_schedules), name="schedules")]
+                 asyncio.create_task(after_ready(watcher.run_schedules), name="schedules"),
+                 asyncio.create_task(after_ready(bot.care.run_backups), name="backups")]
         for platform, checker in checkers.items():
             if checker.ready:
                 tasks.append(asyncio.create_task(watch(platform), name=f"watch-{platform}"))
@@ -117,6 +125,10 @@ async def main() -> int:
                 log.info("%s watcher off: its keys aren't set (.env.example)", platform.title())
         try:
             await bot.start(s.discord_token)
+        except discord.PrivilegedIntentsRequired:
+            log.error("Discord refused a privileged intent. Developer portal → your app → Bot: turn on Message Content "
+                      "and Server Members Intent (or both off), then redeploy.")
+            return 4
         except discord.LoginFailure:
             log.error("Discord refused DISCORD_TOKEN. Copy a fresh one: developer portal → your app → Bot → Reset Token.")
             return 3

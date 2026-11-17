@@ -13,12 +13,15 @@ async def test_commands_register():
     store = Store(":memory:")
     bot = FlavrBot(s, store, CoreLink(store, "k"), Pinger(store, None), Watcher(store, {}, {}))
     names = sorted(c.name for c in bot.tree.get_commands())
-    assert names == ["calendar", "friend", "live", "pings", "points", "queue", "schedule", "setup", "status", "wake"]
+    assert names == ["backup", "calendar", "friend", "live", "mod", "pings", "points", "queue", "roles", "schedule",
+                     "setup", "status", "wake"]
     friend = next(c for c in bot.tree.get_commands() if c.name == "friend")
     assert sorted(c.name for c in friend.commands) == ["add", "hide", "import", "list", "main", "remove",
                                                        "schedule", "unschedule"]
     setup = next(c for c in bot.tree.get_commands() if c.name == "setup")
-    assert sorted(c.name for c in setup.commands) == ["calendar-channel", "live-channel"]
+    assert sorted(c.name for c in setup.commands) == ["calendar-channel", "check", "live-channel", "mod-log"]
+    # without the developer-portal switches the bot asks for neither privileged intent (it would be refused)
+    assert not bot.intents.members and not bot.intents.message_content
     # every command's description fits Discord's 100-character limit
     for c in bot.tree.walk_commands():
         assert len(c.description) <= 100, c.name

@@ -315,6 +315,24 @@ def x_posts(week: Week, handles: Dict[int, str] | None = None, style: str = "rep
 
 
 # ── X Article (style "article") ──────────────────────────────────────────────
+def _hm(seconds: float) -> str:
+    """A stream length for the article: "5h", "1h 54m", "40m". The space is a no-break space so
+    "1h 54m" never splits across two lines. Called by article()."""
+    m = int(round(seconds / 60))
+    h, m = divmod(m, 60)
+    return f"{h}h\u00a0{m}m" if h and m else f"{h}h" if h else f"{m}m"
+
+
+def _article_title(text: str) -> str:
+    """A stream title for the article, called by article(). X turns every #word and @name into its own
+    blue link, even mid-title, so #tags are dropped and @names lose the @ ("with @batsharkvt" ->
+    "with batsharkvt"). The week's own hashtag line (/setup share-tags) still goes at the end."""
+    t = re.sub(r"(?<!\w)#\w+", "", text or "")
+    t = re.sub(r"(?<!\w)@(\w)", r"\1", t)
+    t = re.sub(r"\s+", " ", t).strip(" ·|-–")
+    return _clean(t, 100).replace("@", "")
+
+
 def _link_label(t: Tile) -> str:
     return {"past": "Watch the VOD", "live": "Watch live now", "scheduled": "Stream page"}.get(t.kind, "Watch")
 
@@ -323,8 +341,9 @@ def article(week: Week, handles: Dict[int, str] | None = None, tags: str = "", t
             channels: Dict[int, str] | None = None, save: Any = None) -> Dict[str, Any]:
     """The week as an X Article: {"title", "html", "text", "pictures"}. ``html`` is the body (no
     <html>): a summary line, a "Who streamed" list for the recap, then per day an <h2>, that day's
-    picture and one line per stream (bold "time · name", its title and length, and its link as words:
-    "▶ Watch the VOD"); then the hashtag line.
+    picture and a bullet list: per stream bold "time · name" and its length ("1h 54m"), and under it
+    (a <br> in the same bullet) the stream title as the VOD link (_article_title: no #tags or @);
+    then the hashtag line.
 
     X Articles allow only so many pictures, so it's one picture per day (render.day_card: that day's
     thumbnails in a grid), not one per stream. ``pictures``: [(number, zip file name, day index)].
@@ -362,17 +381,22 @@ def article(week: Week, handles: Dict[int, str] | None = None, tags: str = "", t
         rows = []
         text.append(head)
         for t in tiles:
-            bits = [_clean(t.title or t.game, 100)] if (t.title or t.game) else []
+            # two lines per stream inside one bullet (Sen picked "bullets, two lines each" 2026-11-18):
+            # bold "time · name" + length on top, the stream title under it as the link to the VOD
+            # (live: the stream, scheduled: the channel). No separate "Watch the VOD" words to wrap.
+            name = _article_title(t.title or t.game) or _link_label(t)
+            bits = []
             if t.kind == "past" and t.end:
-                bits.append(f"{t.length / 3600:.1f} h".replace(".0 h", " h") if t.length >= 3600 else f"{int(t.length // 60)} min")
+                bits.append(_hm(t.length))
             if t.kind == "live":
                 bits.append("live now")
             url = _link(t) or channels.get(t.person_id, "")
             who = _who(t, handles)
-            link = f' · <a href="{e(url, quote=True)}">▶ {e(_link_label(t))}</a>' if url else ""
-            rows.append(f"<p><b>{e(_ampm(t.at, week.tz))} · {e(who)}</b>" + "".join(f" · {e(b)}" for b in bits)
-                        + link + "</p>")
-            text.append(f"• {_ampm(t.at, week.tz)} · {who}" + "".join(f" · {b}" for b in bits) + (f" · {url}" if url else ""))
+            top = f"<b>{e(_ampm(t.at, week.tz))} · {e(who)}</b>" + "".join(f" · {e(b)}" for b in bits)
+            under = f'<a href="{e(url, quote=True)}">{e(name)}</a>' if url else e(name)
+            rows.append(f"<li>{top}<br>{under}</li>")
+            text.append(f"• {_ampm(t.at, week.tz)} · {who}" + "".join(f" · {b}" for b in bits)
+                        + f"\n  {name}" + (f" {url}" if url else ""))
         pics = []
         n = len(pictures) + 1
         name = f"{n:02d}-{DAY_NAMES[i][:3].lower()}.png"
@@ -384,7 +408,7 @@ def article(week: Week, handles: Dict[int, str] | None = None, tags: str = "", t
             pics = [f'<div class="nocopy"><img src="{e(local, quote=True)}" alt="{e(head)}">'
                     f'<p>Picture {n} · <a href="{e(local, quote=True)}" download="{name}">Save</a> · '
                     "put it here with X's picture button</p></div>"]
-        parts += [f"<h2>{e(head)}</h2>"] + pics + rows
+        parts += [f"<h2>{e(head)}</h2>"] + pics + ["<ul>" + "".join(rows) + "</ul>"]
     if not week.tiles():
         parts.append(f"<p>{'No streams this week.' if week.recap else 'Nothing scheduled yet.'}</p>")
     if tags.strip():

@@ -33,6 +33,14 @@ up to an hour to show the first time):
     /roles add role [label] [emoji] | remove role | list | post channel [title] [text]   role buttons
     /mod block domain | unblock domain | allow domain | list    the scam link lists
     /backup now               a fresh backup of the server's layout, sent to you
+  Server care round 2 (flavrbot/community.py)
+    /welcome setup [channel] [message] [starter_role] [dm] | rules-button channel | off
+    /lockdown on|off          raid lockdown by hand (it also switches on by itself on a burst of joins)
+    /warn member reason       /warnings member [clear]          (moderators)
+    /setup modmail channel    members' DMs to the bot open a thread there; /modmail close inside it
+    /live-mode add|remove channel | slowmode seconds | voice [channel] | show   while you're live
+    /setup starboard channel [emoji] [count]     /setup moments channel [role]     /birthday set|remove
+    /growth                   joins and leaves, the last 4 weeks
   Owner only (answers only you can see)
     /status             Stream Core, the stream, this PC, the watcher
     /wake               Wake-on-LAN the stream PC
@@ -59,6 +67,8 @@ from . import sysinfo, wol
 from .calendar import DAY_NAMES
 from .config import Settings
 from .server_care import MAX_ROLE_BUTTONS, ServerCare, missing
+from .community import Community, missing_more
+from . import community as community_cmds
 from .core_link import CoreLink
 from .pings import KINDS, Pinger, length
 from .share import X_STYLES
@@ -156,6 +166,12 @@ class FlavrBot(discord.Client):
         self.care = ServerCare(self, store, settings.data_dir, tz=settings.timezone,
                                scam_timeout_min=settings.scam_timeout_min, backup_hour=settings.backup_hour,
                                backup_keep=settings.backup_keep, gateway=gateway)
+        # round 2: welcome, raid lockdown, warnings, modmail, live mode, starboard, member moments, growth
+        # (flavrbot/community.py; settings RAID_JOINS ... MOMENTS_HOUR); growth DM through /pings kind "growth"
+        self.community = Community(self, store, tz=settings.timezone, raid_joins=settings.raid_joins,
+                                   raid_window=settings.raid_window_sec, warn_limit=settings.warn_limit,
+                                   warn_days=settings.warn_days, warn_timeout_min=settings.warn_timeout_min,
+                                   moments_hour=settings.moments_hour, ping=pinger.ping)
         self._register()
 
     # ── helpers ────────────────────────────────────────────────────────
@@ -229,6 +245,7 @@ class FlavrBot(discord.Client):
     # ── server care: Discord events go to flavrbot/server_care.py ──────
     async def on_message(self, m: discord.Message) -> None:
         await self.care.on_message(m)
+        await self.community.on_message(m)          # modmail (DMs in, mods' thread answers out)
 
     async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
         await self.care.on_message_edit(before, after)
@@ -238,15 +255,21 @@ class FlavrBot(discord.Client):
 
     async def on_member_join(self, member: discord.Member) -> None:
         await self.care.on_member_join(member)
+        await self.community.on_member_join(member)  # raid watch, welcome, weekly growth
 
     async def on_member_remove(self, member: discord.Member) -> None:
         await self.care.on_member_remove(member)
+        await self.community.on_member_remove(member)
+
+    async def on_raw_reaction_add(self, p: discord.RawReactionActionEvent) -> None:
+        await self.community.on_raw_reaction_add(p)  # starboard
 
     async def on_audit_log_entry_create(self, entry: discord.AuditLogEntry) -> None:
         await self.care.on_audit_log_entry_create(entry)
 
     async def on_interaction(self, inter: discord.Interaction) -> None:
         await self.care.on_interaction(inter)       # role buttons; slash commands go through self.tree
+        await self.community.on_interaction(inter)  # the "I read the rules" button
 
     # ── go-live posts (Watcher callbacks) ──────────────────────────────
     def live_embed(self, person: Dict[str, Any], session: Dict[str, Any],
@@ -872,6 +895,7 @@ class FlavrBot(discord.Client):
                            panel=panel)
             if bot.care.log_channel(inter.guild) is None:
                 todo.append("Pick the mod log channel: /setup mod-log.")
+            todo += missing_more(inter.guild, inter.guild.me, bot.care.gateway, bot.community)   # round 2 parts
             await inter.response.send_message("Everything's set. ✅" if not todo else "Still needed:\n• " + "\n• ".join(todo),
                                               ephemeral=True)
 
@@ -994,3 +1018,7 @@ class FlavrBot(discord.Client):
                                       "daily backups so far).", file=discord.File(path), ephemeral=True)
 
         tree.add_command(backup)
+
+        # round 2 commands live next to their code (flavrbot/community.py): /welcome, /lockdown, /warn,
+        # /warnings, /modmail, /live-mode, /birthday, /growth and /setup modmail | starboard | moments
+        community_cmds.register(tree, bot, managers_only)

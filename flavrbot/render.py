@@ -15,8 +15,11 @@ Looks (decided with the owner, plan doc "Weekly FlaVR calendar plan"):
   FlaVR    the logo + its colours: pink #f72ca2, lime #b7ef33, yellow #f8cf33, teal #2ae0d4; day
            numbers cycle through them; today outlined teal with a yellow TODAY tag
   Friends  the same layout in plain teal with a text title, so the two never get mixed up
-  Busy days (more than BIG_TILES streams) switch that day to compact rows; past COMPACT_MAX the
-  day ends with "+N more" (the text list under the Discord post always has every stream).
+  Each day column picks its own size so it fills down to the bottom edge: up to BIG_TILES streams
+  get big picture tiles, up to COMPACT_MAX get rows with a small picture, up to SLIM_MAX get slim
+  rows (platform dot, name, time, no picture); past that the day ends with "+N more" (the text
+  list under the Discord post always has every stream). COMPACT_MAX / SLIM_MAX were measured in
+  Chromium for the 735 px grid: change them together with .grid height, .row and .slim CSS.
 
 Chromium: CHROMIUM_PATH if set, else Playwright's own (the Docker image installs it).
 """
@@ -43,7 +46,8 @@ log = logging.getLogger("flavrbot.render")
 ASSETS = Path(__file__).resolve().parent / "assets"
 WIDTH, HEIGHT = 1600, 900
 BIG_TILES = 3           # up to this many streams a day: big picture tiles
-COMPACT_MAX = 7         # compact rows that fit in one day's column
+COMPACT_MAX = 9         # rows with a small picture that fit in one day's column (59 px + 10 px gap)
+SLIM_MAX = 16           # slim rows that fit (36 px + 5 px gap); past this "+N more"
 PRUNE_DAYS = 21
 MAX_PICTURE = 3 * 1024 * 1024
 PLATFORM_BADGE = {"youtube": ("Y", "#ff0033", "#fff"), "twitch": ("T", "#9146ff", "#fff"), "kick": ("K", "#53fc18", "#000")}
@@ -186,6 +190,11 @@ h1{display:flex;align-items:center;gap:18px;font-size:44px;letter-spacing:2px;fo
 .row>div{min-width:0} .row b{display:block;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .row i{display:block;font-style:normal;font-size:11px;color:#aab;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .row .t{font-size:11px;font-weight:700;color:#fff} .row .t.live{color:#ff6b69}
+.day.slim{gap:5px}
+.slim .row{padding:3px 7px;gap:6px;border-radius:7px}
+.slim .row .dots{display:flex;flex-direction:column;gap:2px;flex:none}
+.slim .row .dot{width:7px;height:7px;border-radius:50%}
+.slim .row b{font-size:12px;line-height:15px} .slim .row .t{display:block;line-height:14px}
 .more{font-size:13px;color:#aab;text-align:center;padding-top:2px}
 .empty{color:#667;font-size:14px;text-align:center;margin-top:30px}
 footer{margin-top:12px;display:flex;justify-content:space-between;gap:30px;color:#99a;font-size:15px;white-space:nowrap}
@@ -269,6 +278,29 @@ def _row(t: Tile, week: Week, img: Img) -> str:
             f'<b>{html.escape(t.name)}</b>{when}<i>{html.escape(t.game or t.title)}</i></div></div>')
 
 
+def _slim(t: Tile, week: Week) -> str:
+    """A slim row for packed days (more than COMPACT_MAX): a dot per platform, name, time · length."""
+    dots = "".join(f'<span class="dot" style="background:{PLATFORM_BADGE[p][1]}"></span>'
+                   for p in t.platforms if p in PLATFORM_BADGE)
+    if t.kind == "live":
+        when = '<span class="t live">LIVE</span>'
+    elif t.kind == "past":
+        when = f'<span class="t">{clock(t.at, week.tz, True)} · {hm(t.length)}</span>'
+    else:
+        when = f'<span class="t">{clock(t.at, week.tz)}</span>'
+    return f'<div class="row {t.kind}"><span class="dots">{dots}</span><div><b>{html.escape(t.name)}</b>{when}</div></div>'
+
+
+def day_layout(n: int) -> tuple:
+    """(size, how many shown) for a day with n streams: "big", "row" or "slim" (see the top of
+    this file). When they don't all fit, one slot goes to the "+N more" line."""
+    if n <= BIG_TILES:
+        return "big", n
+    if n <= COMPACT_MAX:
+        return "row", n
+    return "slim", (n if n <= SLIM_MAX else SLIM_MAX - 1)
+
+
 def page(week: Week, img: Img, logo: str = "", footer_note: str = "", refresh: int = 0) -> str:
     """The whole calendar as one HTML document (1600 x 900)."""
     today = week.today_index()
@@ -277,13 +309,15 @@ def page(week: Week, img: Img, logo: str = "", footer_note: str = "", refresh: i
         day = week.start.replace(day=week.start.day) if i == 0 else None
         date = (week.start.date().fromordinal(week.start.date().toordinal() + i))
         state = "today" if i == today else ("past" if 0 <= today and i < today or week.recap else "")
-        if len(tiles) <= BIG_TILES:
+        size, fit = day_layout(len(tiles))
+        if size == "big":
             body = "".join(_tile(t, week, img) for t in tiles)
         else:
-            shown = tiles[:COMPACT_MAX] if len(tiles) <= COMPACT_MAX else tiles[:COMPACT_MAX - 1]
-            body = "".join(_row(t, week, img) for t in shown)
-            if len(tiles) > len(shown):
-                body += f'<div class="more">+{len(tiles) - len(shown)} more</div>'
+            body = "".join(_row(t, week, img) if size == "row" else _slim(t, week) for t in tiles[:fit])
+            if len(tiles) > fit:
+                body += f'<div class="more">+{len(tiles) - fit} more</div>'
+        if size == "slim":
+            state += " slim"
         if not tiles:
             gone = week.recap or (0 <= today and i < today)
             body = f'<div class="empty">{"No streams" if gone else "Nothing scheduled yet"}</div>'

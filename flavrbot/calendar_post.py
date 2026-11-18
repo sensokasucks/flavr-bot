@@ -49,7 +49,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from .calendar import DAY_NAMES, Tile, Week, build_week, changes, week_start
-from .share import X_STYLES, discord_text, x_posts
+from .share import X_STYLES, channel_url, discord_text, x_posts
 from .render import ImageCache, Screenshotter, logo_data_url, page
 from .store import GROUPS, Store
 
@@ -227,8 +227,11 @@ class CalendarPoster:
         """The copy-ready texts: a short note, the Discord version, then each X post. ``style``: an X
         style (flavrbot/share.py X_STYLES); "" = the saved default (/setup share-style)."""
         style = style if style in X_STYLES else (self.store.get("share_x_style") or "reply")
-        handles = {p["id"]: p.get("x_handle") or "" for p in self.store.people(week.group)}
-        xs = x_posts(week, handles, style)
+        people = self.store.people(week.group)
+        handles = {p["id"]: p.get("x_handle") or "" for p in people}
+        xs = x_posts(week, handles, style, bold=bool(self.store.get("share_x_bold")),
+                     tags=str(self.store.get("share_x_tags") or ""), channels={p["id"]: channel_url(p) for p in people},
+                     tag_people=bool(self.store.get("share_x_tag")))
         after = {"reply": "the X post, then its links to paste as a reply." if len(xs) > 1 else "the X post.",
                  "one": "the X post.", "thread": f"an X thread of {len(xs)} posts." if len(xs) > 1 else "the X post."}
         note = ("📋 Copy-ready calendar. Long-press (phone) or right-click (PC) a message → Copy Text. "

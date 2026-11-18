@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from .calendar import DAY_NAMES, Tile, Week
 
@@ -48,20 +48,22 @@ def x_len(text: str) -> int:
     return n
 
 
-def _clock(ts: float, tz) -> str:
-    """"7p", "7:30p", "12a" (short, for X)."""
-    d = datetime.fromtimestamp(ts, tz)
-    h = d.hour % 12 or 12
-    return f"{h}{':%02d' % d.minute if d.minute else ''}{'a' if d.hour < 12 else 'p'}"
-
-
 def _tz_name(week: Week) -> str:
     return datetime.fromtimestamp(week.start.timestamp() + 86400, week.tz).tzname() or ""
 
 
+ZWSP = "\u200b"             # zero-width space: invisible, but "@\u200bname" no longer tags anyone
+
+
+def no_tags(text: str) -> str:
+    """Make pasted text tag nobody, on Discord or X: a zero-width space after every @ ("@everyone",
+    "@here", "@name", Discord's <@123> / <@&123> codes). Looks the same; nobody gets a notification."""
+    return (text or "").replace("@", "@" + ZWSP)
+
+
 def _clean(text: str, n: int = 60) -> str:
     t = re.sub(r"\s+", " ", (text or "").replace("[", "(").replace("]", ")").replace("`", "'")).strip()
-    return t if len(t) <= n else t[: n - 1].rstrip() + "…"
+    return no_tags(t if len(t) <= n else t[: n - 1].rstrip() + "…")
 
 
 def _heading(week: Week) -> str:
@@ -85,7 +87,7 @@ def discord_text(week: Week) -> str:
             what = _clean(t.title or t.game)
             mark = {"past": "✅", "live": "🔴", "scheduled": "•"}[t.kind]
             link = f" [{'VOD' if t.kind == 'past' else 'watch'}](<{t.url}>)" if t.url else ""
-            day.append(f"{mark} {when} **{t.name}**" + (f" · {what}" if what else "") + link)
+            day.append(f"{mark} {when} **{no_tags(t.name)}**" + (f" · {what}" if what else "") + link)
         block = "\n".join(day)
         if len("\n".join(lines)) + len(block) + 20 > DISCORD_MAX:
             lines.append(f"\n+{rest} more")
@@ -100,8 +102,10 @@ def discord_text(week: Week) -> str:
 
 
 def _who(t: Tile, handles: Dict[int, str]) -> str:
+    """The name on X: a real @tag only for handles x_posts kept (tag_people on), else their name
+    with any @ in it defused."""
     h = (handles.get(t.person_id) or "").strip().lstrip("@")
-    return f"@{h}" if h else t.name
+    return f"@{h}" if h else no_tags(t.name)
 
 
 X_STYLES = {
@@ -118,51 +122,165 @@ def _link(t: Tile) -> str:
     return t.url or next((u for u in t.links.values() if u), "")
 
 
-def x_posts(week: Week, handles: Dict[int, str] | None = None, style: str = "reply") -> List[str]:
-    """The X version as a list of posts to paste in order. ``handles``: person id → X handle
-    (/friend x). ``style`` (X_STYLES): "reply" = schedule post + "Links 👇" reply, "one" = one long post
-    with links, "thread" = 280-character numbered thread without links."""
-    handles = handles or {}
-    head = f"🗓️ {_heading(week)} ({week.range_text}, {_tz_name(week)})"
-    if week.recap:
-        head += f"\n{week.stream_count} streams · {week.hours_live:.0f} hours live"
-    days = [(i, tiles) for i, tiles in enumerate(week.days) if tiles]
-    if not days:
-        return [head + ("\nNo streams this week." if week.recap else "\nNothing scheduled yet.")]
+def _ampm(ts: float, tz) -> str:
+    """"7 PM", "7:30 PM" (the X text's times; easier to read than "7p")."""
+    d = datetime.fromtimestamp(ts, tz)
+    return f"{d.hour % 12 or 12}{':%02d' % d.minute if d.minute else ''} {'AM' if d.hour < 12 else 'PM'}"
 
+
+BOLD = {**{chr(ord("A") + k): chr(0x1D5D4 + k) for k in range(26)},
+        **{chr(ord("0") + k): chr(0x1D7EC + k) for k in range(10)}}
+
+
+def _x_day(i: int, week: Week, bold: bool = False) -> str:
+    """A day heading for X: "SUN · NOV 15", or in bold-looking letters ("𝗦𝗨𝗡 · 𝗡𝗢𝗩 𝟭𝟱") when ``bold``.
+    Those letters are Unicode look-alikes (X has no real bold): screen readers and X search don't read
+    them, so they're only ever used for these short headings, never names or titles."""
+    date = week.start + timedelta(days=i)
+    text = f"{DAY_NAMES[i]} · {date:%b}".upper() + f" {date.day}"
+    return "".join(BOLD.get(c, c) for c in text) if bold else text
+
+
+def _x_row(t: Tile, week: Week, handles: Dict[int, str]) -> str:
+    """One stream: "▸ 7 PM · @luluteala" (recap: "▸ 7 PM · @luluteala · 3 h")."""
+    row = f"▸ {_ampm(t.at, week.tz)} · {_who(t, handles)}"
+    if t.kind == "past" and t.end:
+        hours = t.length / 3600
+        row += f" · {hours:.1f} h".replace(".0 h", " h") if hours >= 1 else f" · {int(t.length // 60)} min"
+    return row
+
+
+def channel_url(person: Dict[str, Any]) -> str:
+    """A person's channel page on their main platform (default YouTube, then Twitch, Kick): the one
+    link per person in the X week in review. "" when no account is known yet."""
+    accs = {a["platform"]: a for a in person.get("accounts") or []}
+    for plat in [person.get("main_platform") or "youtube", "youtube", "twitch", "kick"]:
+        a = accs.get(plat)
+        if not a:
+            continue
+        h = (a.get("handle") or "").strip()
+        if plat == "youtube":
+            if h.startswith("UC") and len(h) == 24:
+                return f"https://www.youtube.com/channel/{h}"
+            return f"https://www.youtube.com/@{h.lstrip('@')}" if h else ""
+        if h:
+            return f"https://{'twitch.tv' if plat == 'twitch' else 'kick.com'}/{h.lstrip('@')}"
+    return ""
+
+
+def _recap_people(week: Week) -> List[Dict[str, Any]]:
+    """The week in review per person, most hours first: [{person_id, name, tile, streams, hours}]."""
+    by: Dict[int, Dict[str, Any]] = {}
+    for t in week.tiles():
+        if t.kind != "past":
+            continue
+        r = by.setdefault(t.person_id, {"person_id": t.person_id, "name": t.name, "tile": t, "streams": 0, "hours": 0.0})
+        r["streams"] += 1
+        r["hours"] += t.length / 3600
+    return sorted(by.values(), key=lambda r: (-r["hours"], r["name"].lower()))
+
+
+def _recap_posts(week: Week, head: str, handles: Dict[int, str], channels: Dict[int, str], style: str,
+                 tail: List[str]) -> List[str]:
+    """The X week in review: one line per person ("▸ Lulu Teala · 5 streams · 19 h"), not per stream
+    (38 lines is too much to read on X); the links are each person's channel, once."""
+    rows = []
+    for r in _recap_people(week):
+        hours = f"{r['hours']:.0f} h" if r["hours"] >= 1 else f"{r['hours'] * 60:.0f} min"
+        rows.append((r, f"▸ {_who(r['tile'], handles)} · {r['streams']} stream{'s' if r['streams'] != 1 else ''} · {hours}"))
+    link = lambda r: channels.get(r["person_id"]) or _link(r["tile"])  # noqa: E731
     if style == "one":
-        lines = [head]
-        for i, tiles in days:
-            lines.append(f"\n{DAY_NAMES[i].title()}")
-            for t in tiles:
-                what = _clean(t.title or t.game, 50)
-                lines.append(f"{_clock(t.at, week.tz)} {_who(t, handles)}" + (f" · {what}" if what else "")
-                             + (f" {_link(t)}" if _link(t) else ""))
-        return ["\n".join(lines)[:X_PREMIUM_MAX]]
-
-    # one line a day: "Wed 4p Cara · 9p @luluteala"
-    rows = [f"{DAY_NAMES[i].title()} " + " · ".join(f"{_clock(t.at, week.tz)} {_who(t, handles)}" for t in tiles)
-            for i, tiles in days]
+        body = "\n".join(row + (f"\n   {link(r)}" if link(r) else "") for r, row in rows)
+        return ["\n\n".join([head, body] + tail)[:X_PREMIUM_MAX]]
     if style == "reply":
-        links = [f"{_who(t, handles)} ({DAY_NAMES[i].title()} {_clock(t.at, week.tz)}): {_link(t)}"
-                 for i, tiles in days for t in tiles if _link(t)]
-        posts = ["\n".join([head] + rows)[:X_PREMIUM_MAX]]
+        posts = ["\n\n".join([head, "\n".join(row for _, row in rows)] + tail)[:X_PREMIUM_MAX]]
+        links = [f"{_who(r['tile'], handles)}\n{link(r)}" for r, _ in rows if link(r)]
         if links:
-            posts.append("\n".join(["Links 👇"] + links)[:X_PREMIUM_MAX])
+            posts.append("\n\n".join(["📼 Catch the VODs"] + links)[:X_PREMIUM_MAX])
         return posts
-
-    # "thread": pack the day lines into 280-character posts; leave room for a " (2/3)" counter
-    packed: List[List[str]] = [[head]]
-    for r in rows:
-        while x_len(r) > X_MAX - 8:              # a single packed day too long for a post: cut it
-            r = r[: max(10, len(r) - 10)].rsplit(" · ", 1)[0] + " …"
-        if x_len("\n".join(packed[-1] + [r])) > X_MAX - 8:
+    packed: List[List[str]] = [[head, ""]]
+    for _, row in rows:
+        if x_len("\n".join(packed[-1] + [row])) > X_MAX - 8:
             packed.append([])
-        packed[-1].append(r)
-    texts = ["\n".join(p) for p in packed]
+        packed[-1].append(row)
+    texts = ["\n".join(p).strip() for p in packed]
+    if tail and x_len(texts[-1] + "\n\n" + tail[0]) <= X_MAX - 8:
+        texts[-1] += "\n\n" + tail[0]
     if len(texts) > 1:
-        texts = [f"{t}\n({i}/{len(texts)})" for i, t in enumerate(texts, 1)]
+        texts = [f"{t}\n\n({i}/{len(texts)})" for i, t in enumerate(texts, 1)]
     return texts
 
 
-__all__ = ["discord_text", "x_posts", "x_len", "X_STYLES"]
+def x_posts(week: Week, handles: Dict[int, str] | None = None, style: str = "reply", bold: bool = False,
+            tags: str = "", channels: Dict[int, str] | None = None, tag_people: bool = False) -> List[str]:
+    """The X version as a list of posts to paste in order. ``handles``: person id → X handle
+    (/friend x). ``style`` (X_STYLES): "reply" = schedule post + links reply, "one" = one long post
+    with links, "thread" = 280-character numbered thread without links.
+
+    X shows no markdown (asterisks would print as they are), so the look comes from layout alone:
+    a two-line heading, then a block per day (a "SUN · NOV 15" heading, one "▸ 7 PM · name" line per
+    stream) with a blank line between blocks. Links go on their own lines. ``tag_people``: the /friend x
+    handles as real @tags (default off: names, nobody notified). ``bold``: bold-looking day
+    headings; ``tags``: a hashtag line at the end of the schedule post (/setup share-style).
+    The week in review is a per-person summary instead (``_recap_posts``); ``channels``: person id →
+    their main channel's page, the one link per person there."""
+    # Tags: the X handles saved with /friend x become real @tags only with tag_people on (/setup
+    # share-style); off (the default) = everyone by their name. @s inside names and titles are
+    # always defused (no_tags), so nothing pasted tags anyone by accident.
+    handles = (handles or {}) if tag_people else {}
+    if week.recap:
+        head = (f"📼 {_heading(week)}\n{week.range_text} · {week.stream_count} streams · "
+                f"{week.hours_live:.0f} hours live")
+    else:
+        head = f"🗓️ {_heading(week)}\n{week.range_text} · times in {_tz_name(week)}"
+    days = [(i, tiles) for i, tiles in enumerate(week.days) if tiles]
+    tail = [tags.strip()] if tags.strip() else []
+    if not days:
+        return ["\n\n".join([head + ("\n\nNo streams this week." if week.recap else "\n\nNothing scheduled yet.")] + tail)]
+
+    if week.recap:
+        return _recap_posts(week, head, handles, channels or {}, style, tail)
+
+    if style == "one":
+        blocks = [head]
+        for i, tiles in days:
+            rows = [_x_day(i, week, bold)]
+            for t in tiles:
+                # no stream titles on X: they're long, and their own #tags and @names would tag people
+                # and clutter the post (a busy week had 38 of them)
+                rows.append(_x_row(t, week, handles))
+                if _link(t):
+                    rows.append(f"   {_link(t)}")
+            blocks.append("\n".join(rows))
+        return ["\n\n".join(blocks + tail)[:X_PREMIUM_MAX]]
+
+    blocks = ["\n".join([_x_day(i, week, bold)] + [_x_row(t, week, handles) for t in tiles]) for i, tiles in days]
+    if style == "reply":
+        posts = ["\n\n".join([head] + blocks + tail)[:X_PREMIUM_MAX]]
+        links, seen = [], set()
+        for i, tiles in days:
+            for t in tiles:
+                if _link(t) and _link(t) not in seen:     # the same channel page twice = listed once
+                    seen.add(_link(t))
+                    links.append(f"{_who(t, handles)} · {DAY_NAMES[i].title()} {_ampm(t.at, week.tz)}\n{_link(t)}")
+        if links:
+            posts.append("\n\n".join(["🔗 Links"] + links)[:X_PREMIUM_MAX])
+        return posts
+
+    # "thread": pack whole day blocks into 280-character posts; leave room for a "(2/3)" counter
+    packed: List[List[str]] = [[head]]
+    for b in blocks:
+        while x_len(b) > X_MAX - 8:              # one day too long for a post: drop its last streams
+            b = b.rsplit("\n", 1)[0]
+        if x_len("\n\n".join(packed[-1] + [b])) > X_MAX - 8:
+            packed.append([])
+        packed[-1].append(b)
+    if tail and x_len("\n\n".join(packed[-1] + tail)) <= X_MAX - 8:
+        packed[-1] += tail
+    texts = ["\n\n".join(p) for p in packed]
+    if len(texts) > 1:
+        texts = [f"{t}\n\n({i}/{len(texts)})" for i, t in enumerate(texts, 1)]
+    return texts
+
+
+__all__ = ["discord_text", "x_posts", "x_len", "X_STYLES", "channel_url"]

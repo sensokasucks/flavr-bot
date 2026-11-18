@@ -1,5 +1,6 @@
 """Copy-ready calendar text (flavrbot/share.py) and the share DM package (CalendarPoster.share)."""
 
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -33,15 +34,20 @@ def test_discord_text_uses_time_stamps_and_quiet_links():
 
 
 def test_x_reply_style_keeps_links_out_of_the_main_post():
-    posts = x_posts(week(2), {0: "@lulu"}, "reply")
+    posts = x_posts(week(2), {0: "@lulu"}, "reply", tag_people=True)
     assert len(posts) == 2
-    assert "https://" not in posts[0] and "Sun 7p @lulu · 8p Streamer01" in posts[0] and "(Nov 15 – 21, EST)" in posts[0]
-    assert posts[1].startswith("Links 👇") and "@lulu (Sun 7p): https://youtu.be/v00" in posts[1]
+    assert "https://" not in posts[0] and "Nov 15 – 21 · times in EST" in posts[0]
+    assert "SUN · NOV 15\n▸ 7 PM · @lulu\n▸ 8 PM · Streamer01\n\nMON · NOV 16" in posts[0]
+    assert posts[1].startswith("🔗 Links") and "@lulu · Sun 7 PM\nhttps://youtu.be/v00" in posts[1]
 
 
 def test_x_one_post_has_everything():
     posts = x_posts(week(3), {}, "one")
-    assert len(posts) == 1 and posts[0].count("https://") == 21 and "7p Streamer00 · Game night https://" in posts[0]
+    assert len(posts) == 1 and posts[0].count("https://") == 21
+    assert "▸ 7 PM · Streamer00\n   https://youtu.be/v00" in posts[0] and "Game night" not in posts[0]
+    recap = x_posts(week(1, recap=True), {}, "reply")
+    assert recap[0].startswith("📼 FlaVR week in review") and "▸ Streamer00 · 1 stream · 2 h" in recap[0]
+    assert recap[1].startswith("📼 Catch the VODs")
 
 
 def test_x_thread_fits_280():
@@ -68,7 +74,10 @@ async def test_share_package_and_default_style():
     w = week()
     w.days[0][0].person_id = pid
     msgs = poster.share_messages(w)
-    assert msgs[0].startswith("📋") and msgs[1].startswith("🗓️ **") and "@luluteala" in msgs[2] and msgs[3].startswith("Links")
+    assert msgs[0].startswith("📋") and msgs[1].startswith("🗓️ **") and msgs[3].startswith("🔗 Links")
+    assert "@luluteala" not in msgs[2]                                  # nobody tagged by default
+    store.put("share_x_tag", True)
+    assert "@luluteala" in poster.share_messages(w)[2]
     store.put("share_x_style", "one")
     assert len(poster.share_messages(w)) == 3
     assert len(poster.share_messages(w, "thread")) >= 3               # an override beats the default
@@ -80,3 +89,42 @@ async def test_share_package_and_default_style():
     poster.quiet = lambda: False
     await poster.flush_shares()
     assert len(d.sent) == 1 and d.sent[0][1] == b"png"
+
+
+def test_x_bold_days_and_hashtags():
+    posts = x_posts(week(1), {}, "reply", bold=True, tags="#FlaVR #vtuber")
+    assert "𝗦𝗨𝗡 · 𝗡𝗢𝗩 𝟭𝟱\n▸ 7 PM · Streamer00" in posts[0]
+    assert posts[0].endswith("\n\n#FlaVR #vtuber") and "#FlaVR" not in posts[1]
+    thread = x_posts(week(4), {}, "thread", tags="#FlaVR")
+    assert all(x_len(p) <= X_MAX for p in thread)
+
+
+def test_x_recap_is_one_line_per_person_with_their_channel():
+    w = week(2, recap=True)
+    for d in w.days:                        # the same two people every day
+        for k, t in enumerate(d):
+            t.person_id, t.name = k + 1, ["Lulu", "Raimi"][k]
+    w.days[0][0].end += 3600                # Lulu streamed one hour longer: listed first
+    posts = x_posts(w, {1: "luluteala"}, "reply", channels={1: "https://www.youtube.com/@luluteala"}, tag_people=True)
+    assert "▸ @luluteala · 7 streams · 15 h\n▸ Raimi · 7 streams · 14 h" in posts[0]
+    assert posts[1].count("https://") == 2 and "@luluteala\nhttps://www.youtube.com/@luluteala" in posts[1]
+    one = x_posts(w, {}, "one")[0]
+    assert one.count("https://") == 2
+
+
+def test_channel_url():
+    from flavrbot.share import channel_url
+    assert channel_url({"accounts": [{"platform": "twitch", "handle": "sensoka"}]}) == "https://twitch.tv/sensoka"
+    assert channel_url({"main_platform": "", "accounts": [{"platform": "twitch", "handle": "x"},
+                        {"platform": "youtube", "handle": "@lulu"}]}) == "https://www.youtube.com/@lulu"
+    assert channel_url({"accounts": []}) == ""
+
+
+def test_pasted_text_tags_nobody():
+    w = week(1)
+    t = w.days[0][0]
+    t.title, t.name = "Red Dragon Inn w/ @zosimustarkas_vt @everyone <@123>", "@weird name"
+    texts = [discord_text(w)] + x_posts(w, {t.person_id: "someone"}, "one") + x_posts(w, {}, "reply")
+    for text in texts:
+        assert re.search(r"@(?!\u200b)", text) is None, text          # every @ is defused
+    assert "zosimustarkas_vt" in texts[0]                               # the words stay readable

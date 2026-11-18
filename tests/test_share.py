@@ -136,3 +136,25 @@ def test_pasted_text_tags_nobody():
     for text in texts:
         assert re.search(r"@(?!\u200b)", text) is None, text          # every @ is defused
     assert "zosimustarkas_vt" in texts[0]                               # the words stay readable
+
+
+def test_x_article_has_headings_links_and_no_tags():
+    from flavrbot.share import article
+    w = week(2, recap=True)
+    w.days[0][0].title = "Game night w/ @everyone <script>"
+    a = article(w, {0: "lulu"}, tags="#FlaVR", tag_people=False)
+    assert a["title"] == "FlaVR week in review · Nov 15 – 21"
+    assert a["html"].count("<h2>") == 1 + 7 and "<h2>Who streamed</h2>" in a["html"]
+    assert '<h2>Sunday, November 15</h2>' in a["html"] and '<a href="https://youtu.be/v00">Watch the VOD</a>' in a["html"]
+    assert "<script" not in a["html"] and re.search(r"@(?!​)", a["text"]) is None and "#FlaVR" in a["html"]
+    assert "@lulu" in article(w, {0: "lulu"}, tag_people=True)["html"]             # only with tag_people on
+    assert "Stream page" in article(week(1))["html"] and article(week(1))["title"] == "This week in FlaVR · Nov 15 – 21"
+
+
+def test_article_style_links_the_copy_page():
+    store = Store(":memory:")
+    poster = CalendarPoster(store, FakeDiscord(), None, None, clock=lambda: SUN.timestamp() + 3600)
+    poster.web_url = "http://192.168.0.20:3870"
+    msgs = poster.share_messages(week(), "article")
+    assert len(msgs) == 1 + 7 + 1 and "X Article" in msgs[0]
+    assert "<http://192.168.0.20:3870/calendar/article?group=flavr>" in msgs[-1] and "This week in FlaVR" in msgs[-1]

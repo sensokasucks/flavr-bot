@@ -49,7 +49,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from .calendar import DAY_NAMES, Tile, Week, build_week, changes, week_start
-from .share import X_STYLES, channel_url, discord_parts, x_posts
+from .share import X_STYLES, article, channel_url, discord_parts, x_posts
 from .render import ImageCache, Screenshotter, logo_data_url, page
 from . import groups
 from .store import Store
@@ -152,6 +152,9 @@ class CalendarPoster:
         self.backfill = backfill                    # Watcher.backfill(start, end) → sessions added
         self.share_on = share_on or (lambda: False)  # Pinger switch "share"
         self._shares: List[Tuple[Week, Optional[bytes]]] = []    # waiting for quiet hours to end
+        # the bot's own web address on the home network ("http://192.168.0.20:3870"), for the X Article
+        # page link in the share DM; set by flavrbot/__main__.py from WEB_ADDRESS (or found by itself)
+        self.web_url = ""
         self._poke = asyncio.Event()
         self._lock = asyncio.Lock()
         self._seen: Dict[str, Tuple[str, Dict[str, Tile]]] = {}    # group → (week, {key: tile}) last look
@@ -228,6 +231,20 @@ class CalendarPoster:
         style = style if style in X_STYLES else (self.store.get("share_x_style") or "reply")
         people = self.store.people(week.group)
         handles = {p["id"]: p.get("x_handle") or "" for p in people}
+        if style == "article":
+            # X Articles take rich text, which a DM can't hold: link the page that has a Copy button
+            # (flavrbot/web.py /calendar/article); share.article builds what that page shows
+            title = article(week)["title"]
+            off = round((week.start - self.week_of(0)).days / 7)
+            q = f"?group={week.group}" + {1: "&week=next", -1: "&week=last"}.get(off, "")
+            url = f"{self.web_url or 'http://<this PC>:3870'}/calendar/article{q}"
+            dc = discord_parts(week)
+            note = ("📋 Copy-ready calendar. Long-press (phone) or right-click (PC) a message → Copy Text. "
+                    f"Next: the Discord version{'' if len(dc) == 1 else f', one message per day ({len(dc)})'}, "
+                    "then the X Article.")
+            return [note] + dc + [f"📰 **X Article:** {title}\nOpen <{url}> on your home network, press "
+                                  "**Copy article**, and paste it into a new Article on X (Write → Article). "
+                                  "The page also has the title and the picture for the cover."]
         xs = x_posts(week, handles, style, bold=bool(self.store.get("share_x_bold")),
                      tags=str(self.store.get("share_x_tags") or ""), channels={p["id"]: channel_url(p) for p in people},
                      tag_people=bool(self.store.get("share_x_tag")))

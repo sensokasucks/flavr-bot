@@ -54,6 +54,7 @@ class Settings:
     core_key: str = ""                  # shared password; Core sends it as "Authorization: Bearer ..."
     listen_host: str = "0.0.0.0"        # home network only: never forward this port on the router
     listen_port: int = 3870
+    web_address: str = ""               # how phones / PCs at home reach this bot's pages ("" = found by itself)
     heartbeat_late_sec: int = 90        # no heartbeat this long during a stream = "Core stopped answering"
     # Wake-on-LAN (/wake)
     stream_pc_mac: str = ""
@@ -111,6 +112,7 @@ def load(env: Optional[Mapping[str, str]] = None) -> Settings:
         core_key=g("FLAVR_CORE_KEY"),
         listen_host=g("LISTEN_HOST", "0.0.0.0"),
         listen_port=_int(env, "LISTEN_PORT", 3870),
+        web_address=g("WEB_ADDRESS").rstrip("/"),
         heartbeat_late_sec=max(45, _int(env, "HEARTBEAT_LATE_SEC", 90)),
         stream_pc_mac=g("STREAM_PC_MAC"),
         wol_broadcast=g("WOL_BROADCAST", "255.255.255.255"),

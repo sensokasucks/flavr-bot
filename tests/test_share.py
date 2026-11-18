@@ -145,10 +145,10 @@ def test_x_article_has_headings_links_and_no_tags():
     a = article(w, {0: "lulu"}, tags="#FlaVR", tag_people=False)
     assert a["title"] == "FlaVR week in review · Nov 15 – 21"
     assert a["html"].count("<h2>") == 1 + 7 and "<h2>Who streamed</h2>" in a["html"]
-    assert '<h2>Sunday, November 15</h2>' in a["html"] and '<a href="https://youtu.be/v00">▶ Watch the VOD</a>' in a["html"]
+    assert '<h2>Sunday, November 15</h2>' in a["html"] and '<br><a href="https://youtu.be/v00">' in a["html"] and "Watch the VOD" not in a["html"]
     assert "<script" not in a["html"] and re.search(r"@(?!​)", a["text"]) is None and "#FlaVR" in a["html"]
     assert "@lulu" in article(w, {0: "lulu"}, tag_people=True)["html"]             # only with tag_people on
-    assert "Stream page" in article(week(1))["html"] and article(week(1))["title"] == "This week in FlaVR · Nov 15 – 21"
+    assert "<br><a href=" in article(week(1))["html"] and article(week(1))["title"] == "This week in FlaVR · Nov 15 – 21"
 
 
 def test_article_style_links_the_copy_page():
@@ -195,3 +195,11 @@ def test_cover_stats_line():
     assert cover_stats({"hours": 24.4, "streams": 6}, True) == "24h · 6 streams"
     assert cover_stats({"hours": 2.5, "streams": 1}, True) == "2.5h · 1 stream"
     assert cover_stats({"hours": 0, "streams": 3}, False) == "3 planned"
+
+
+def test_article_titles_and_lengths_read_clean():
+    from flavrbot.share import _article_title, _hm
+    assert _article_title("Weeb Night with @batsharkvt") == "Weeb Night with batsharkvt"
+    assert _article_title("This Time Dark Sawrm #vtuber #flavr") == "This Time Dark Sawrm"
+    assert _article_title("@here") == "here" and "@" not in _article_title("mail a@b")
+    assert _hm(5 * 3600) == "5h" and _hm(6840) == "1h\u00a054m" and _hm(2400) == "40m"

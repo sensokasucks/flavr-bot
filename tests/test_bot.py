@@ -15,7 +15,7 @@ async def test_commands_register():
     bot = FlavrBot(s, store, CoreLink(store, "k"), Pinger(store, None), Watcher(store, {}, {}))
     names = sorted(c.name for c in bot.tree.get_commands())
     assert names == ["backup", "birthday", "calendar", "friend", "group", "growth", "live", "live-mode", "lockdown",
-                     "me", "mod", "modmail", "pings", "points", "queue", "roles", "schedule", "setup", "status",
+                     "me", "mod", "modmail", "pings", "points", "queue", "roles", "said", "schedule", "setup", "status",
                      "talent", "wake", "warn", "warnings", "welcome"]
     me = next(c for c in bot.tree.get_commands() if c.name == "me")
     assert sorted(c.name for c in me.commands) == ["hide", "main", "posts", "schedule", "share", "unschedule", "x"]

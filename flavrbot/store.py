@@ -18,6 +18,11 @@ Tables
             on each refresh (flavrbot/watcher.py refresh_schedules / YouTube checks).
   manual_schedule  regular weekly times set by hand with /friend schedule (Kick has no schedule
             API; anyone else who doesn't use their platform's schedule).
+  chat      a copy of Stream Core's saved chat history (Core's chat_messages, sent in "chat"
+            messages by fridge-stream-core/core/companion_link.py), for /said (flavrbot/said.py).
+            core_id is Core's own row id: the bot answers each push with the highest one it has
+            (``chat_since``) and Core sends the lines after it, so a fresh or wiped copy fills
+            itself in. chat_fts is its word index (SQLite FTS5) when the SQLite build has FTS5.
 
 people.hidden (set with /friend hide) keeps someone off the calendar and recap; the go-live
 watcher still follows them. people.talent_channel / discord_user / live_group / live_own are the
@@ -30,6 +35,7 @@ matters (the watcher), or directly for single-row reads (commands).
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -92,6 +98,15 @@ CREATE TABLE IF NOT EXISTS scheduled (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS scheduled_key ON scheduled(platform, item_key);
 CREATE INDEX IF NOT EXISTS scheduled_at ON scheduled(at);
+CREATE TABLE IF NOT EXISTS chat (
+  core_id INTEGER PRIMARY KEY,
+  platform TEXT NOT NULL DEFAULT '',
+  username TEXT NOT NULL DEFAULT '',
+  display_name TEXT NOT NULL DEFAULT '',
+  message TEXT NOT NULL DEFAULT '',
+  at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS chat_at ON chat(at);
 CREATE TABLE IF NOT EXISTS manual_schedule (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
@@ -154,6 +169,18 @@ class Store:
             if col not in have:
                 self._db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
         self._db.commit()
+        self.fts = self._make_fts()
+
+    def _make_fts(self) -> bool:
+        """The chat word index (FTS5, external content = the chat table). False when this SQLite
+        has no FTS5: /said then searches with LIKE (slower, same results for plain words)."""
+        try:
+            self._db.execute("CREATE VIRTUAL TABLE IF NOT EXISTS chat_fts USING fts5(message, "
+                             "content='chat', content_rowid='core_id')")
+            self._db.commit()
+            return True
+        except sqlite3.OperationalError:
+            return False
 
     # ── kv ─────────────────────────────────────────────────────────────
     def get(self, key: str, default: Any = None) -> Any:
@@ -412,3 +439,85 @@ class Store:
                  "JOIN people p ON p.id=m.person_id" + (" WHERE p.grp=?" if group else "") +
                  " ORDER BY m.weekday, m.minute")
             return [dict(r) for r in self._db.execute(q, (group,) if group else ())]
+
+    # ── chat copy (/said, flavrbot/said.py) ────────────────────────────
+    def chat_since(self) -> int:
+        """The highest Core chat row id the bot has (0 = none); sent back to Core with every push."""
+        with self._lock:
+            row = self._db.execute("SELECT MAX(core_id) AS m FROM chat").fetchone()
+        return int(row["m"] or 0)
+
+    def add_chat(self, lines: List[Dict[str, Any]]) -> int:
+        """Core's "chat" message: [{id, platform, username, display_name, message, at}]. Rows the bot
+        already has are skipped. Returns how many were new."""
+        added = 0
+        with self._lock:
+            for ln in lines:
+                try:
+                    cid = int(ln.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                cur = self._db.execute(
+                    "INSERT OR IGNORE INTO chat(core_id, platform, username, display_name, message, at) "
+                    "VALUES(?,?,?,?,?,?)", (cid, str(ln.get("platform") or ""), str(ln.get("username") or ""),
+                                            str(ln.get("display_name") or ""), str(ln.get("message") or "")[:2000],
+                                            float(ln.get("at") or 0)))
+                if cur.rowcount:
+                    added += 1
+                    if self.fts:
+                        self._db.execute("INSERT INTO chat_fts(rowid, message) VALUES(?, ?)",
+                                         (cid, str(ln.get("message") or "")[:2000]))
+            self._db.commit()
+        return added
+
+    def clear_chat(self, before: Optional[float] = None) -> int:
+        """Core's "chat_cleared": lines older than ``before`` (Core's keep-days trim), or all of them
+        (a clear by hand in Core's Chat history; Core then sends what it still has again)."""
+        with self._lock:
+            if before is None:
+                n = self._db.execute("DELETE FROM chat").rowcount
+                if self.fts:
+                    self._db.execute("INSERT INTO chat_fts(chat_fts) VALUES('delete-all')")
+            else:
+                if self.fts:
+                    self._db.execute("INSERT INTO chat_fts(chat_fts, rowid, message) "
+                                     "SELECT 'delete', core_id, message FROM chat WHERE at < ?", (before,))
+                n = self._db.execute("DELETE FROM chat WHERE at < ?", (before,)).rowcount
+            self._db.commit()
+        return n
+
+    def search_chat(self, words: str = "", who: str = "", platform: str = "", since: float = 0,
+                    limit: int = 10, offset: int = 0) -> Dict[str, Any]:
+        """/said: lines matching all ``words`` (any order), from ``who`` (username or display name,
+        any case), on ``platform``, newer than ``since``; newest first. {"rows": [...], "total": n}."""
+        clauses, args = [], []
+        terms = [t for t in re.findall(r"\w+", words or "")][:8]
+        if terms and self.fts:
+            clauses.append("c.core_id IN (SELECT rowid FROM chat_fts WHERE chat_fts MATCH ?)")
+            args.append(" ".join(f'"{t}"' for t in terms))
+        else:
+            for t in terms:
+                clauses.append("lower(c.message) LIKE ?")
+                args.append(f"%{t.lower()}%")
+        if who.strip():
+            w = who.strip().lstrip("@").lower()
+            clauses.append("(lower(c.username)=? OR lower(c.display_name)=?)")
+            args += [w, w]
+        if platform:
+            clauses.append("c.platform=?")
+            args.append(platform)
+        if since:
+            clauses.append("c.at>=?")
+            args.append(since)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        with self._lock:
+            total = self._db.execute(f"SELECT COUNT(*) AS n FROM chat c {where}", args).fetchone()["n"]
+            rows = [dict(r) for r in self._db.execute(
+                f"SELECT c.* FROM chat c {where} ORDER BY c.at DESC, c.core_id DESC LIMIT ? OFFSET ?",
+                (*args, limit, offset))]
+        return {"rows": rows, "total": int(total)}
+
+    def chat_count(self) -> int:
+        with self._lock:
+            return int(self._db.execute("SELECT COUNT(*) AS n FROM chat").fetchone()["n"])
+

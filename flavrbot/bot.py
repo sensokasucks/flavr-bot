@@ -47,6 +47,8 @@ up to an hour to show the first time):
                         /live, /schedule, /calendar view|share used there show only them
     /me schedule day time [title] | unschedule | main platform | x handle | hide [hidden] |
         posts [group_channel] [own_channel] | share [week]     the linked person's own entry
+  Moderators (owner, Manage Server or Manage Messages)
+    /said [words] [who] [platform] [days] [page]   search past stream chat (Core's saved chat; flavrbot/said.py)
   Owner only (answers only you can see)
     /status             Stream Core, the stream, this PC, the watcher
     /wake               Wake-on-LAN the stream PC
@@ -76,7 +78,7 @@ from .config import Settings
 from .server_care import MAX_ROLE_BUTTONS, ServerCare, missing
 from .community import Community, missing_more
 from . import community as community_cmds
-from . import talent
+from . import said, talent
 from .core_link import CoreLink
 from .pings import KINDS, Pinger, length
 from .share import X_STYLES
@@ -1093,3 +1095,4 @@ class FlavrBot(discord.Client):
         # /warnings, /modmail, /live-mode, /birthday, /growth and /setup modmail | starboard | moments
         community_cmds.register(tree, bot, managers_only)
         talent.register(tree, bot, managers_only, day_choices, parse_time)     # /talent and /me
+        said.register(tree, bot)                    # /said chat search (flavrbot/said.py)

@@ -2,7 +2,9 @@
 The Stream Core side door: Core (on the stream PC) sends what it knows to this bot.
 
   POST /core/push   Authorization: Bearer <FLAVR_CORE_KEY>
-                    {"type": "hello" | "heartbeat" | "stream" | "alert" | "snapshot", "data": {...}, "at": unix s}
+                    {"type": "hello" | "heartbeat" | "stream" | "alert" | "snapshot" | "chat" | "chat_cleared",
+                     "data": {...}, "at": unix s}
+                    answer {"ok": true, "chat_since": <highest chat row id the bot has>}
   GET  /health      {"ok": true}  (no password; Docker's health check)
   GET  /calendar...  the weekly calendar page, picture and .ics feed (flavrbot/web.py, added
                      through ``extra_routes`` by flavrbot/__main__.py)
@@ -15,6 +17,9 @@ What this file does with them (``CoreLink``):
     answer after the bot restarts while the stream PC is off);
   * calls ``on_stream(change)`` for each stream start / drop / resume / end and
     ``on_alert(alert)`` for each alert (flavrbot/pings.py turns those into phone pings);
+  * keeps a copy of Core's saved chat ("chat" lines into the chat table, "chat_cleared" wipes
+    it) for /said (flavrbot/said.py). Every answer carries ``chat_since``, so Core knows which
+    lines to send next (a new or wiped copy fills itself in from Core's history);
   * watches the heartbeat: no heartbeat for HEARTBEAT_LATE_SEC while Core last said "live" calls
     ``on_core_lost()``; the next heartbeat after that calls ``on_core_back()``.
 
@@ -106,7 +111,7 @@ class CoreLink:
         except Exception:
             log.exception("Core push %s failed", msg.get("type"))
             return web.json_response({"ok": False, "error": "bot error"}, status=500)
-        return web.json_response({"ok": True})
+        return web.json_response({"ok": True, "chat_since": self.store.chat_since()})
 
     async def handle(self, kind: str, data: Dict[str, Any]) -> None:
         """One message from Core (also called directly by tests)."""
@@ -137,6 +142,14 @@ class CoreLink:
         elif kind == "alert" and isinstance(data, dict):
             if self.on_alert:
                 await self.on_alert(data)
+        elif kind == "chat" and isinstance(data, dict):
+            # a batch of Core's saved chat lines (oldest first), for /said
+            lines = [ln for ln in (data.get("lines") or []) if isinstance(ln, dict)]
+            await asyncio.to_thread(self.store.add_chat, lines)
+        elif kind == "chat_cleared" and isinstance(data, dict):
+            # Core cleared saved chat: by age (its keep-days trim) or by hand (then it sends again)
+            before = data.get("before")
+            await asyncio.to_thread(self.store.clear_chat, float(before) if before else None)
         else:
             log.info("Core sent an unknown message type %r (newer Core?); ignored", kind)
 

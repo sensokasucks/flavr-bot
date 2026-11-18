@@ -145,7 +145,7 @@ def test_x_article_has_headings_links_and_no_tags():
     a = article(w, {0: "lulu"}, tags="#FlaVR", tag_people=False)
     assert a["title"] == "FlaVR week in review · Nov 15 – 21"
     assert a["html"].count("<h2>") == 1 + 7 and "<h2>Who streamed</h2>" in a["html"]
-    assert '<h2>Sunday, November 15</h2>' in a["html"] and '<a href="https://youtu.be/v00">Watch the VOD</a>' in a["html"]
+    assert '<h2>Sunday, November 15</h2>' in a["html"] and '<a href="https://youtu.be/v00">▶ Watch the VOD</a>' in a["html"]
     assert "<script" not in a["html"] and re.search(r"@(?!​)", a["text"]) is None and "#FlaVR" in a["html"]
     assert "@lulu" in article(w, {0: "lulu"}, tag_people=True)["html"]             # only with tag_people on
     assert "Stream page" in article(week(1))["html"] and article(week(1))["title"] == "This week in FlaVR · Nov 15 – 21"
@@ -158,3 +158,15 @@ def test_article_style_links_the_copy_page():
     msgs = poster.share_messages(week(), "article")
     assert len(msgs) == 1 + 7 + 1 and "X Article" in msgs[0]
     assert "<http://192.168.0.20:3870/calendar/article?group=flavr>" in msgs[-1] and "This week in FlaVR" in msgs[-1]
+
+
+def test_article_pictures_sit_above_their_vod_links():
+    from flavrbot.share import article
+    w = week(1, recap=True)
+    w.days[0][0].thumb = "https://i.ytimg.com/vi/v00/hqdefault.jpg"
+    w.days[1][0].avatar = "https://yt3.example/lulu.jpg"
+    a = article(w, save=lambda u: "/calendar/img/x.jpg")
+    assert [p[:2] for p in a["pictures"]] == [(1, "01-sun-streamer00.jpg"), (2, "02-mon-streamer10.jpg")]
+    h = a["html"]
+    assert h.index('<img src="https://i.ytimg.com/vi/v00/hqdefault.jpg"') < h.index("Picture 1") < h.index("youtu.be/v00")
+    assert 'class="nocopy"' in h and "Picture" not in article(w)["html"]       # no save line without the cache

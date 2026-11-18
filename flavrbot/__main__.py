@@ -78,7 +78,8 @@ async def main() -> int:
         poster = CalendarPoster(store, bot, ImageCache(Path(s.data_dir) / "cache" / "img", http), shooter,
                                 tz=s.timezone, preview_hour=s.calendar_preview_hour, recap_hour=s.calendar_recap_hour,
                                 ping=lambda: pinger.switches().get("calendar", False), quiet=pinger.quiet_now,
-                                hold=lambda text: pinger.ping("calendar", text), backfill=watcher.backfill)
+                                hold=lambda text: pinger.ping("calendar", text), backfill=watcher.backfill,
+                                share_on=lambda: pinger.switches().get("share", False))
         bot.calendar = poster
         link.extra_routes.append(lambda app: add_routes(app, poster))
 

@@ -17,9 +17,10 @@ async def test_commands_register():
                      "setup", "status", "wake"]
     friend = next(c for c in bot.tree.get_commands() if c.name == "friend")
     assert sorted(c.name for c in friend.commands) == ["add", "hide", "import", "list", "main", "remove",
-                                                       "schedule", "unschedule"]
+                                                       "schedule", "unschedule", "x"]
     setup = next(c for c in bot.tree.get_commands() if c.name == "setup")
-    assert sorted(c.name for c in setup.commands) == ["calendar-channel", "check", "live-channel", "mod-log"]
+    assert sorted(c.name for c in setup.commands) == ["calendar-channel", "check", "live-channel", "mod-log",
+                                                      "share-style"]
     # without the developer-portal switches the bot asks for neither privileged intent (it would be refused)
     assert not bot.intents.members and not bot.intents.message_content
     # every command's description fits Discord's 100-character limit

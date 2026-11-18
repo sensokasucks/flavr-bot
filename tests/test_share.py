@@ -44,8 +44,9 @@ def test_x_one_post_has_everything():
     posts = x_posts(week(3), {}, "one")
     assert len(posts) == 1 and posts[0].count("https://") == 21
     assert "▸ 7 PM · Streamer00\n   https://youtu.be/v00" in posts[0] and "Game night" not in posts[0]
-    recap = x_posts(week(1, recap=True), {}, "reply")[0]
-    assert recap.startswith("📼 FlaVR week in review") and "▸ 7 PM · Streamer00 · 2 h" in recap
+    recap = x_posts(week(1, recap=True), {}, "reply")
+    assert recap[0].startswith("📼 FlaVR week in review") and "▸ Streamer00 · 1 stream · 2 h" in recap[0]
+    assert recap[1].startswith("📼 Catch the VODs")
 
 
 def test_x_thread_fits_280():
@@ -92,3 +93,24 @@ def test_x_bold_days_and_hashtags():
     assert posts[0].endswith("\n\n#FlaVR #vtuber") and "#FlaVR" not in posts[1]
     thread = x_posts(week(4), {}, "thread", tags="#FlaVR")
     assert all(x_len(p) <= X_MAX for p in thread)
+
+
+def test_x_recap_is_one_line_per_person_with_their_channel():
+    w = week(2, recap=True)
+    for d in w.days:                        # the same two people every day
+        for k, t in enumerate(d):
+            t.person_id, t.name = k + 1, ["Lulu", "Raimi"][k]
+    w.days[0][0].end += 3600                # Lulu streamed one hour longer: listed first
+    posts = x_posts(w, {1: "luluteala"}, "reply", channels={1: "https://www.youtube.com/@luluteala"})
+    assert "▸ @luluteala · 7 streams · 15 h\n▸ Raimi · 7 streams · 14 h" in posts[0]
+    assert posts[1].count("https://") == 2 and "@luluteala\nhttps://www.youtube.com/@luluteala" in posts[1]
+    one = x_posts(w, {}, "one")[0]
+    assert one.count("https://") == 2
+
+
+def test_channel_url():
+    from flavrbot.share import channel_url
+    assert channel_url({"accounts": [{"platform": "twitch", "handle": "sensoka"}]}) == "https://twitch.tv/sensoka"
+    assert channel_url({"main_platform": "", "accounts": [{"platform": "twitch", "handle": "x"},
+                        {"platform": "youtube", "handle": "@lulu"}]}) == "https://www.youtube.com/@lulu"
+    assert channel_url({"accounts": []}) == ""

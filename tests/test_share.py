@@ -38,10 +38,10 @@ def test_discord_text_uses_time_stamps_and_quiet_links():
 
 def test_x_reply_style_keeps_links_out_of_the_main_post():
     posts = x_posts(week(2), {0: "@lulu"}, "reply", tag_people=True)
-    assert len(posts) == 2
+    assert len(posts) == 1 + 7                                  # the schedule, then one links post per day
     assert "https://" not in posts[0] and "Nov 15 – 21 · times in EST" in posts[0]
     assert "SUN · NOV 15\n▸ 7 PM · @lulu\n▸ 8 PM · Streamer01\n\nMON · NOV 16" in posts[0]
-    assert posts[1].startswith("🔗 Links") and "@lulu · Sun 7 PM\nhttps://youtu.be/v00" in posts[1]
+    assert posts[1] == "🔗 SUN · NOV 15\n\n@lulu · 7 PM\nhttps://youtu.be/v00\n\nStreamer01 · 8 PM\nhttps://youtu.be/v01"
 
 
 def test_x_one_post_has_everything():
@@ -50,7 +50,7 @@ def test_x_one_post_has_everything():
     assert "▸ 7 PM · Streamer00\n   https://youtu.be/v00" in posts[0] and "Game night" not in posts[0]
     recap = x_posts(week(1, recap=True), {}, "reply")
     assert recap[0].startswith("📼 FlaVR week in review") and "▸ Streamer00 · 1 stream · 2 h" in recap[0]
-    assert recap[1].startswith("📼 Catch the VODs")
+    assert recap[1].startswith("🔗 SUN · NOV 15") and "https://youtu.be/v00" in recap[1]     # the VOD itself
 
 
 def test_x_thread_fits_280():
@@ -77,14 +77,16 @@ async def test_share_package_and_default_style():
     w = week()
     w.days[0][0].person_id = pid
     msgs = poster.share_messages(w)
-    assert msgs[0].startswith("📋") and msgs[1].startswith("🗓️ **") and msgs[3].startswith("🔗 Links")
-    assert "the Discord version, then" in msgs[0]
-    assert "@luluteala" not in msgs[2]                                  # nobody tagged by default
+    # the note, 7 Discord days, the X post, 7 links posts
+    assert len(msgs) == 16 and msgs[0].startswith("📋") and "one message per day (7" in msgs[0]
+    assert msgs[1].startswith("🗓️ **") and msgs[2].startswith("**Mon Nov 16**") and msgs[8].startswith("🗓️ This week")
+    assert msgs[9].startswith("🔗 SUN") and "7 links post(s)" in msgs[0]
+    assert "@luluteala" not in msgs[8]                                  # nobody tagged by default
     store.put("share_x_tag", True)
-    assert "@luluteala" in poster.share_messages(w)[2]
+    assert "@luluteala" in poster.share_messages(w)[8]
     store.put("share_x_style", "one")
-    assert len(poster.share_messages(w)) == 3
-    assert len(poster.share_messages(w, "thread")) >= 3               # an override beats the default
+    assert len(poster.share_messages(w)) == 1 + 7 + 1                 # "one": note, 7 Discord days, one X post
+    assert len(poster.share_messages(w, "thread")) > 9               # an override beats the default
     # automatic shares wait for quiet hours to end, and only with the switch on
     poster.share_on, poster.quiet = (lambda: True), (lambda: True)
     poster._share_later(w, b"png")
@@ -103,7 +105,7 @@ def test_x_bold_days_and_hashtags():
     assert all(x_len(p) <= X_MAX for p in thread)
 
 
-def test_x_recap_is_one_line_per_person_with_their_channel():
+def test_x_recap_is_one_line_per_person_with_vods_per_day():
     w = week(2, recap=True)
     for d in w.days:                        # the same two people every day
         for k, t in enumerate(d):
@@ -111,9 +113,11 @@ def test_x_recap_is_one_line_per_person_with_their_channel():
     w.days[0][0].end += 3600                # Lulu streamed one hour longer: listed first
     posts = x_posts(w, {1: "luluteala"}, "reply", channels={1: "https://www.youtube.com/@luluteala"}, tag_people=True)
     assert "▸ @luluteala · 7 streams · 15 h\n▸ Raimi · 7 streams · 14 h" in posts[0]
-    assert posts[1].count("https://") == 2 and "@luluteala\nhttps://www.youtube.com/@luluteala" in posts[1]
+    # links: each stream's own VOD, one post per day (not the channel page)
+    assert len(posts) == 8 and "@luluteala · 7 PM\nhttps://youtu.be/v00" in posts[1]
+    assert "youtube.com/@luluteala" not in "".join(posts)
     one = x_posts(w, {}, "one")[0]
-    assert one.count("https://") == 2
+    assert one.count("https://") == 14 and one.index("▸ Lulu · 7 streams") < one.index("SUN · NOV 15")
 
 
 def test_channel_url():

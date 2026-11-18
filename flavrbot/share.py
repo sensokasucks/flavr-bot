@@ -3,8 +3,7 @@ Copy-ready calendar text for posting elsewhere (other Discord servers, X / Twitt
 post to X by itself (X's API needs a paid plan), so it DMs the owner a package to paste:
 
   1. the calendar picture (save it, attach it anywhere)
-  2. a Discord version: the day-by-day list with links, every stream (split into several messages
-     of at most 2000 characters, between days, when the week is long). Times are Discord time stamps (<t:…:t>), so
+  2. a Discord version: the day-by-day list with links, every stream, one message per day. Times are Discord time stamps (<t:…:t>), so
      every reader sees their own time zone in any server. Links are wrapped in <…> so pasting it
      doesn't make a wall of link previews. Sent as its own message: long-press / right-click →
      Copy Text copies exactly what to paste.
@@ -75,9 +74,9 @@ def _heading(week: Week) -> str:
 
 
 def discord_parts(week: Week) -> List[str]:
-    """The Discord version, EVERY stream, as one or more messages of at most 2000 characters (what a bot
-    may send; Sen pastes them one after another). Split between days, or inside a very long day
-    between streams. Past streams link their VOD, scheduled ones their page."""
+    """The Discord version, EVERY stream, one message per day (Sen pastes them one after another).
+    A day longer than 2000 characters (what a bot may send) is split between streams. Past streams
+    link their VOD, scheduled ones their page."""
     head = f"🗓️ **{_heading(week)}** · {week.range_text}"
     blocks: List[str] = []
     for i, tiles in enumerate(week.days):
@@ -103,12 +102,12 @@ def discord_parts(week: Week) -> List[str]:
         return [head + "\n" + ("No streams this week." if week.recap else "Nothing on the calendar.")]
     if week.recap:
         blocks.append(f"{week.stream_count} streams · {week.hours_live:.0f} hours live")
-    parts: List[str] = [head]
-    for blk in blocks:
-        if len(parts[-1] + "\n\n" + blk) > DISCORD_MAX:
-            parts.append(blk)
-        else:
-            parts[-1] += "\n\n" + blk
+    # one message per day (Sen: easier to paste, and a day never reaches the limit); the heading rides
+    # on the first day, the totals line on the last
+    parts = list(blocks[:-1] if week.recap else blocks)
+    parts[0] = head + "\n\n" + parts[0]
+    if week.recap:
+        parts[-1] += "\n\n" + blocks[-1]
     return parts
 
 
@@ -126,7 +125,7 @@ def _who(t: Tile, handles: Dict[int, str]) -> str:
 
 X_STYLES = {
     # /setup share-style and /calendar share style: (label, what you get)
-    "reply": ("Post + links reply", "the schedule as one post, the links as a second post to paste as its reply"),
+    "reply": ("Post + links replies", "the schedule as one post, then one links post per day to paste as replies"),
     "one": ("All in one post", "one long post with every stream and its link (needs X Premium past 280)"),
     "thread": ("280-character thread", "no X Premium: the schedule split into numbered posts, no links"),
 }
@@ -196,26 +195,47 @@ def _recap_people(week: Week) -> List[Dict[str, Any]]:
     return sorted(by.values(), key=lambda r: (-r["hours"], r["name"].lower()))
 
 
+def _day_links(days, week: Week, handles: Dict[int, str], bold: bool, channels: Dict[int, str]) -> List[str]:
+    """The links as replies, one post per day ("🔗 SUN · NOV 8", then "Name · 6:57 AM" over each
+    stream's own link: its VOD once it's over, its page while live or scheduled). The channel page
+    only stands in when a stream has no link of its own."""
+    posts = []
+    for i, tiles in days:
+        rows, seen = [], set()
+        for t in tiles:
+            url = _link(t) or channels.get(t.person_id, "")
+            if url and url not in seen:
+                seen.add(url)
+                rows.append(f"{_who(t, handles)} · {_ampm(t.at, week.tz)}\n{url}")
+        if rows:
+            posts.append("\n\n".join([f"🔗 {_x_day(i, week, bold)}"] + rows)[:X_PREMIUM_MAX])
+    return posts
+
+
 def _recap_posts(week: Week, head: str, handles: Dict[int, str], channels: Dict[int, str], style: str,
-                 tail: List[str]) -> List[str]:
-    """The X week in review: one line per person ("▸ Lulu Teala · 5 streams · 19 h"), not per stream
-    (38 lines is too much to read on X); the links are each person's channel, once."""
+                 tail: List[str], days, bold: bool) -> List[str]:
+    """The X week in review: the main post is one line per person ("▸ Lulu Teala · 5 streams · 19 h"),
+    not per stream (38 lines is too much to read on X). The VODs follow: one reply per day ("reply"),
+    or day blocks under the summary ("one")."""
     rows = []
     for r in _recap_people(week):
         hours = f"{r['hours']:.0f} h" if r["hours"] >= 1 else f"{r['hours'] * 60:.0f} min"
-        rows.append((r, f"▸ {_who(r['tile'], handles)} · {r['streams']} stream{'s' if r['streams'] != 1 else ''} · {hours}"))
-    link = lambda r: channels.get(r["person_id"]) or _link(r["tile"])  # noqa: E731
-    if style == "one":
-        body = "\n".join(row + (f"\n   {link(r)}" if link(r) else "") for r, row in rows)
-        return ["\n\n".join([head, body] + tail)[:X_PREMIUM_MAX]]
+        rows.append(f"▸ {_who(r['tile'], handles)} · {r['streams']} stream{'s' if r['streams'] != 1 else ''} · {hours}")
+    summary = "\n\n".join([head, "\n".join(rows)] + tail)[:X_PREMIUM_MAX]
     if style == "reply":
-        posts = ["\n\n".join([head, "\n".join(row for _, row in rows)] + tail)[:X_PREMIUM_MAX]]
-        links = [f"{_who(r['tile'], handles)}\n{link(r)}" for r, _ in rows if link(r)]
-        if links:
-            posts.append("\n\n".join(["📼 Catch the VODs"] + links)[:X_PREMIUM_MAX])
-        return posts
+        return [summary] + _day_links(days, week, handles, bold, channels)
+    if style == "one":
+        blocks = []
+        for i, tiles in days:
+            lines = [_x_day(i, week, bold)]
+            for t in tiles:
+                lines.append(_x_row(t, week, handles))
+                if _link(t):
+                    lines.append(f"   {_link(t)}")
+            blocks.append("\n".join(lines))
+        return ["\n\n".join([head, "\n".join(rows)] + blocks + tail)[:X_PREMIUM_MAX]]
     packed: List[List[str]] = [[head, ""]]
-    for _, row in rows:
+    for row in rows:
         if x_len("\n".join(packed[-1] + [row])) > X_MAX - 8:
             packed.append([])
         packed[-1].append(row)
@@ -238,8 +258,9 @@ def x_posts(week: Week, handles: Dict[int, str] | None = None, style: str = "rep
     stream) with a blank line between blocks. Links go on their own lines. ``tag_people``: the /friend x
     handles as real @tags (default off: names, nobody notified). ``bold``: bold-looking day
     headings; ``tags``: a hashtag line at the end of the schedule post (/setup share-style).
-    The week in review is a per-person summary instead (``_recap_posts``); ``channels``: person id →
-    their main channel's page, the one link per person there."""
+    "reply" puts the links in one reply post per day. The week in review's main post is a per-person
+    summary (``_recap_posts``). ``channels``: person id → their channel page, only used for a stream
+    with no link of its own."""
     # Tags: the X handles saved with /friend x become real @tags only with tag_people on (/setup
     # share-style); off (the default) = everyone by their name. @s inside names and titles are
     # always defused (no_tags), so nothing pasted tags anyone by accident.
@@ -255,7 +276,7 @@ def x_posts(week: Week, handles: Dict[int, str] | None = None, style: str = "rep
         return ["\n\n".join([head + ("\n\nNo streams this week." if week.recap else "\n\nNothing scheduled yet.")] + tail)]
 
     if week.recap:
-        return _recap_posts(week, head, handles, channels or {}, style, tail)
+        return _recap_posts(week, head, handles, channels or {}, style, tail, days, bold)
 
     if style == "one":
         blocks = [head]
@@ -272,16 +293,7 @@ def x_posts(week: Week, handles: Dict[int, str] | None = None, style: str = "rep
 
     blocks = ["\n".join([_x_day(i, week, bold)] + [_x_row(t, week, handles) for t in tiles]) for i, tiles in days]
     if style == "reply":
-        posts = ["\n\n".join([head] + blocks + tail)[:X_PREMIUM_MAX]]
-        links, seen = [], set()
-        for i, tiles in days:
-            for t in tiles:
-                if _link(t) and _link(t) not in seen:     # the same channel page twice = listed once
-                    seen.add(_link(t))
-                    links.append(f"{_who(t, handles)} · {DAY_NAMES[i].title()} {_ampm(t.at, week.tz)}\n{_link(t)}")
-        if links:
-            posts.append("\n\n".join(["🔗 Links"] + links)[:X_PREMIUM_MAX])
-        return posts
+        return ["\n\n".join([head] + blocks + tail)[:X_PREMIUM_MAX]] + _day_links(days, week, handles, bold, channels or {})
 
     # "thread": pack whole day blocks into 280-character posts; leave room for a "(2/3)" counter
     packed: List[List[str]] = [[head]]

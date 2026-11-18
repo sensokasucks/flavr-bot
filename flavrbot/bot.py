@@ -23,6 +23,11 @@ up to an hour to show the first time):
     /calendar share [group] [week] [style]   DMs you copy-ready text for other Discords and X (flavrbot/share.py)
     /setup share-style style   the X text's default layout (post + links reply / one post / 280 thread)
     /friend x name handle   their X handle, so the X text tags them ("-" removes it)
+  Server care (flavrbot/server_care.py; owner or Manage Server)
+    /setup mod-log channel    where the mod log goes      /setup check   what the bot still needs
+    /roles add role [label] [emoji] | remove role | list | post channel [title] [text]   role buttons
+    /mod block domain | unblock domain | allow domain | list    the scam link lists
+    /backup now               a fresh backup of the server's layout, sent to you
   Owner only (answers only you can see)
     /status             Stream Core, the stream, this PC, the watcher
     /wake               Wake-on-LAN the stream PC
@@ -48,6 +53,7 @@ from discord import app_commands
 from . import sysinfo, wol
 from .calendar import DAY_NAMES
 from .config import Settings
+from .server_care import MAX_ROLE_BUTTONS, ServerCare, missing
 from .core_link import CoreLink
 from .pings import KINDS, Pinger, length
 from .share import X_STYLES
@@ -121,8 +127,16 @@ def parse_import(text: str) -> List[Tuple[str, str, str, str]]:
 
 
 class FlavrBot(discord.Client):
-    def __init__(self, settings: Settings, store: Store, link: CoreLink, pinger: Pinger, watcher: Watcher):
-        super().__init__(intents=discord.Intents.default(), allowed_mentions=NO_PINGS)
+    def __init__(self, settings: Settings, store: Store, link: CoreLink, pinger: Pinger, watcher: Watcher,
+                 gateway: Optional[Dict[str, bool]] = None):
+        # ``gateway``: which privileged switches are on in the developer portal (server_care.gateway_intents,
+        # read before connecting). Asking for one that's off would make Discord refuse to connect at all.
+        gateway = gateway or {"members": False, "content": False}
+        intents = discord.Intents.default()
+        intents.members = gateway.get("members", False)
+        intents.message_content = gateway.get("content", False)
+        # max_messages: recent messages kept in memory, so the mod log can show what a deleted message said
+        super().__init__(intents=intents, allowed_mentions=NO_PINGS, max_messages=5000)
         self.settings = settings
         self.store = store
         self.link = link
@@ -133,6 +147,10 @@ class FlavrBot(discord.Client):
         self.calendar: Any = None
         # set once Discord says we're in; the go-live watcher waits for it so its first posts don't get lost
         self.ready_event = asyncio.Event()
+        # role buttons, mod log, scam links, backups (settings: SCAM_TIMEOUT_MIN, BACKUP_HOUR, BACKUP_KEEP)
+        self.care = ServerCare(self, store, settings.data_dir, tz=settings.timezone,
+                               scam_timeout_min=settings.scam_timeout_min, backup_hour=settings.backup_hour,
+                               backup_keep=settings.backup_keep, gateway=gateway)
         self._register()
 
     # ── helpers ────────────────────────────────────────────────────────
@@ -202,6 +220,28 @@ class FlavrBot(discord.Client):
     async def on_ready(self) -> None:
         log.info("Discord: logged in as %s", self.user)
         self.ready_event.set()
+
+    # ── server care: Discord events go to flavrbot/server_care.py ──────
+    async def on_message(self, m: discord.Message) -> None:
+        await self.care.on_message(m)
+
+    async def on_message_edit(self, before: discord.Message, after: discord.Message) -> None:
+        await self.care.on_message_edit(before, after)
+
+    async def on_raw_message_delete(self, p: discord.RawMessageDeleteEvent) -> None:
+        await self.care.on_raw_message_delete(p)
+
+    async def on_member_join(self, member: discord.Member) -> None:
+        await self.care.on_member_join(member)
+
+    async def on_member_remove(self, member: discord.Member) -> None:
+        await self.care.on_member_remove(member)
+
+    async def on_audit_log_entry_create(self, entry: discord.AuditLogEntry) -> None:
+        await self.care.on_audit_log_entry_create(entry)
+
+    async def on_interaction(self, inter: discord.Interaction) -> None:
+        await self.care.on_interaction(inter)       # role buttons; slash commands go through self.tree
 
     # ── go-live posts (Watcher callbacks) ──────────────────────────────
     def live_embed(self, person: Dict[str, Any], session: Dict[str, Any],
@@ -657,4 +697,144 @@ class FlavrBot(discord.Client):
             bot.store.put("share_x_style", style.value)
             await inter.response.send_message(f"X text: {X_STYLES[style.value][1]}.", ephemeral=True)
 
+        @setup.command(name="mod-log", description="Where the mod log goes (deletes, edits, joins, bans, scams)")
+        async def setup_mod_log(inter: discord.Interaction, channel: discord.TextChannel):
+            if not await managers_only(inter) or inter.guild is None:
+                return
+            bot.store.put(f"mod_log.{inter.guild.id}", str(channel.id))
+            todo = missing(inter.guild, inter.guild.me, bot.care.gateway, mod_log=channel)
+            await inter.response.send_message(f"The mod log goes to {channel.mention}. Keep that channel private to mods."
+                                              + ("\n\nStill needed:\n• " + "\n• ".join(todo) if todo else ""),
+                                              ephemeral=True)
+
+        @setup.command(name="check", description="What server care still needs (permissions, switches)")
+        async def setup_check(inter: discord.Interaction):
+            if not await managers_only(inter) or inter.guild is None:
+                return
+            panel = [r for r in (inter.guild.get_role(int(x["id"])) for x in bot.care.panel(inter.guild.id)["roles"]) if r]
+            todo = missing(inter.guild, inter.guild.me, bot.care.gateway, mod_log=bot.care.log_channel(inter.guild),
+                           panel=panel)
+            if bot.care.log_channel(inter.guild) is None:
+                todo.append("Pick the mod log channel: /setup mod-log.")
+            await inter.response.send_message("Everything's set. ✅" if not todo else "Still needed:\n• " + "\n• ".join(todo),
+                                              ephemeral=True)
+
         tree.add_command(setup)
+
+        roles = app_commands.Group(name="roles", description="Role buttons (owner or Manage Server)")
+
+        @roles.command(name="add", description="Put a role on the button panel")
+        @app_commands.describe(label="Button text (default: the role's name)", emoji="Optional emoji on the button")
+        async def roles_add(inter: discord.Interaction, role: discord.Role, label: Optional[str] = None,
+                            emoji: Optional[str] = None):
+            if not await managers_only(inter) or inter.guild is None:
+                return
+            pm = role.permissions
+            if role.is_default() or role.managed or pm.administrator or pm.manage_guild or pm.manage_roles \
+                    or pm.manage_channels or pm.manage_messages or pm.kick_members or pm.ban_members \
+                    or pm.moderate_members or pm.mention_everyone:
+                await inter.response.send_message(f"**{role.name}** can't be a button: it's a bot's own role or it has "
+                                                  "moderator permissions, and anyone could give it to themselves.",
+                                                  ephemeral=True)
+                return
+            p = bot.care.panel(inter.guild.id)
+            p["roles"] = [r for r in p["roles"] if int(r["id"]) != role.id]
+            if len(p["roles"]) >= MAX_ROLE_BUTTONS:
+                await inter.response.send_message(f"The panel is full ({MAX_ROLE_BUTTONS} buttons).", ephemeral=True)
+                return
+            p["roles"].append({"id": str(role.id), "label": (label or role.name)[:80], "emoji": (emoji or "").strip()[:40]})
+            bot.care.save_panel(inter.guild.id, p)
+            note = "" if role.is_assignable() else (f"\n⚠️ Drag my role above **{role.name}** in Server Settings → Roles, "
+                                                    "or the button can't give it.")
+            await inter.response.send_message(f"Added **{role.name}**. Run /roles post to show the panel (or update it)."
+                                              + note, ephemeral=True, allowed_mentions=NO_PINGS)
+
+        @roles.command(name="remove", description="Take a role off the button panel")
+        async def roles_remove(inter: discord.Interaction, role: discord.Role):
+            if not await managers_only(inter) or inter.guild is None:
+                return
+            p = bot.care.panel(inter.guild.id)
+            before = len(p["roles"])
+            p["roles"] = [r for r in p["roles"] if int(r["id"]) != role.id]
+            bot.care.save_panel(inter.guild.id, p)
+            await inter.response.send_message(f"Removed **{role.name}**. Run /roles post to update the panel."
+                                              if len(p["roles"]) < before else f"**{role.name}** wasn't on the panel.",
+                                              ephemeral=True, allowed_mentions=NO_PINGS)
+
+        @roles.command(name="list", description="The roles on the button panel")
+        async def roles_list(inter: discord.Interaction):
+            if not await managers_only(inter) or inter.guild is None:
+                return
+            p = bot.care.panel(inter.guild.id)
+            lines = [f"{r.get('emoji') or '•'} {r['label']} (<@&{r['id']}>)" for r in p["roles"]] or ["No roles yet: /roles add."]
+            if p.get("channel"):
+                lines.append(f"Panel in <#{p['channel']}>.")
+            await inter.response.send_message("\n".join(lines), ephemeral=True, allowed_mentions=NO_PINGS)
+
+        @roles.command(name="post", description="Post the role button panel (or update the one already there)")
+        @app_commands.describe(title="Panel heading", text="Text above the buttons")
+        async def roles_post(inter: discord.Interaction, channel: discord.TextChannel, title: Optional[str] = None,
+                             text: Optional[str] = None):
+            if not await managers_only(inter) or inter.guild is None:
+                return
+            p = bot.care.panel(inter.guild.id)
+            if title:
+                p["title"] = title[:256]
+            if text:
+                p["text"] = text[:2000]
+            bot.care.save_panel(inter.guild.id, p)
+            await inter.response.defer(ephemeral=True)
+            problem = await bot.care.post_panel(channel)
+            await inter.followup.send(problem or f"The role panel is in {channel.mention}.", ephemeral=True)
+
+        tree.add_command(roles)
+
+        mod = app_commands.Group(name="mod", description="Scam link lists (owner or Manage Server)")
+
+        @mod.command(name="block", description="Treat every link to this site as a scam")
+        async def mod_block(inter: discord.Interaction, domain: str):
+            if not await managers_only(inter):
+                return
+            d = bot.care.set_domain("blocked", domain, True)
+            await inter.response.send_message(f"Links to **{d}** are now removed." if d else "That isn't a web address.",
+                                              ephemeral=True)
+
+        @mod.command(name="unblock", description="Take a site off the block list")
+        async def mod_unblock(inter: discord.Interaction, domain: str):
+            if not await managers_only(inter):
+                return
+            d = bot.care.set_domain("blocked", domain, False)
+            await inter.response.send_message(f"**{d}** is off the block list." if d else "That isn't a web address.",
+                                              ephemeral=True)
+
+        @mod.command(name="allow", description="Never treat this site as a scam (fixes a wrong catch)")
+        async def mod_allow(inter: discord.Interaction, domain: str, allowed: bool = True):
+            if not await managers_only(inter):
+                return
+            d = bot.care.set_domain("allowed", domain, allowed)
+            await inter.response.send_message((f"**{d}** is always allowed." if allowed else f"**{d}** is checked again.")
+                                              if d else "That isn't a web address.", ephemeral=True)
+
+        @mod.command(name="list", description="The blocked and always-allowed sites")
+        async def mod_list(inter: discord.Interaction):
+            if not await managers_only(inter):
+                return
+            b, a = sorted(bot.care.domains("blocked")), sorted(bot.care.domains("allowed"))
+            await inter.response.send_message(f"**Blocked:** {', '.join(b) or 'none'}\n**Always allowed:** "
+                                              f"{', '.join(a) or 'none'}\nFake Discord / Steam / Nitro sites are caught "
+                                              "without being listed.", ephemeral=True)
+
+        tree.add_command(mod)
+
+        backup = app_commands.Group(name="backup", description="Backups of the server's layout (owner or Manage Server)")
+
+        @backup.command(name="now", description="Back up channels, roles and permissions now (file sent to you)")
+        async def backup_now(inter: discord.Interaction):
+            if not await managers_only(inter) or inter.guild is None:
+                return
+            await inter.response.defer(ephemeral=True, thinking=True)
+            path = await bot.care.backup(inter.guild)
+            await inter.followup.send(f"Saved. A copy is also kept on the bot's PC ({len(list(path.parent.glob('server-*.json')))} "
+                                      "daily backups so far).", file=discord.File(path), ephemeral=True)
+
+        tree.add_command(backup)

@@ -77,6 +77,10 @@ class Settings:
     calendar_preview_hour: int = 10
     calendar_recap_hour: int = 23
     chromium_path: str = ""             # blank = Playwright's own Chromium (the Docker image has it)
+    # Server care (flavrbot/server_care.py)
+    scam_timeout_min: int = 60          # timeout for someone who posts a scam link (minutes; 0 = none)
+    backup_hour: int = 4                # daily server layout backup at this hour (TZ, 0-23)
+    backup_keep: int = 30               # backups kept (one per day)
     # Storage
     data_dir: str = "/data"
     extra: Dict[str, str] = field(default_factory=dict)
@@ -118,6 +122,9 @@ def load(env: Optional[Mapping[str, str]] = None) -> Settings:
         calendar_preview_hour=_int(env, "CALENDAR_PREVIEW_HOUR", 10) % 24,
         calendar_recap_hour=_int(env, "CALENDAR_RECAP_HOUR", 23) % 24,
         chromium_path=g("CHROMIUM_PATH"),
+        scam_timeout_min=max(0, min(40320, _int(env, "SCAM_TIMEOUT_MIN", 60))),     # Discord's cap: 28 days
+        backup_hour=_int(env, "BACKUP_HOUR", 4) % 24,
+        backup_keep=max(1, _int(env, "BACKUP_KEEP", 30)),
         data_dir=g("DATA_DIR", "/data"),
     )
 

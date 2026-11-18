@@ -3,7 +3,8 @@ Copy-ready calendar text for posting elsewhere (other Discord servers, X / Twitt
 post to X by itself (X's API needs a paid plan), so it DMs the owner a package to paste:
 
   1. the calendar picture (save it, attach it anywhere)
-  2. a Discord version: the day-by-day list with links. Times are Discord time stamps (<t:…:t>), so
+  2. a Discord version: the day-by-day list with links, every stream (split into several messages
+     of at most 2000 characters, between days, when the week is long). Times are Discord time stamps (<t:…:t>), so
      every reader sees their own time zone in any server. Links are wrapped in <…> so pasting it
      doesn't make a wall of link previews. Sent as its own message: long-press / right-click →
      Copy Text copies exactly what to paste.
@@ -73,32 +74,47 @@ def _heading(week: Week) -> str:
     return f"This week in {name}" if week.group == "flavr" else f"This week with {name}"
 
 
-def discord_text(week: Week) -> str:
-    """The Discord version (≤ 2000 characters). Past streams link their VOD, scheduled ones their page."""
-    lines = [f"🗓️ **{_heading(week)}** · {week.range_text}"]
-    rest = sum(len(d) for d in week.days)
+def discord_parts(week: Week) -> List[str]:
+    """The Discord version, EVERY stream, as one or more messages of at most 2000 characters (what a bot
+    may send; Sen pastes them one after another). Split between days, or inside a very long day
+    between streams. Past streams link their VOD, scheduled ones their page."""
+    head = f"🗓️ **{_heading(week)}** · {week.range_text}"
+    blocks: List[str] = []
     for i, tiles in enumerate(week.days):
         if not tiles:
             continue
         date = week.start + timedelta(days=i)
-        day = [f"\n**{DAY_NAMES[i].title()} {date:%b} {date.day}**"]
+        day = [f"**{DAY_NAMES[i].title()} {date:%b} {date.day}**"]
         for t in tiles:
             when = f"<t:{int(t.at)}:t>" + (f"–<t:{int(t.end)}:t>" if t.kind == "past" and t.end else "")
             what = _clean(t.title or t.game)
             mark = {"past": "✅", "live": "🔴", "scheduled": "•"}[t.kind]
             link = f" [{'VOD' if t.kind == 'past' else 'watch'}](<{t.url}>)" if t.url else ""
             day.append(f"{mark} {when} **{no_tags(t.name)}**" + (f" · {what}" if what else "") + link)
-        block = "\n".join(day)
-        if len("\n".join(lines)) + len(block) + 20 > DISCORD_MAX:
-            lines.append(f"\n+{rest} more")
-            break
-        lines.append(block)
-        rest -= len(tiles)
-    if len(lines) == 1:
-        lines.append("Nothing on the calendar." if not week.recap else "No streams this week.")
-    elif week.recap:
-        lines.append(f"\n{week.stream_count} streams · {week.hours_live:.0f} hours live")
-    return "\n".join(lines)[:DISCORD_MAX]
+        # a day longer than one message (rare) is cut between streams, its heading repeated
+        chunk: List[str] = []
+        for row in day[1:]:
+            if chunk and len("\n".join([day[0]] + chunk + [row])) > DISCORD_MAX - 50:
+                blocks.append("\n".join([day[0]] + chunk))
+                chunk = []
+            chunk.append(row[: DISCORD_MAX - 100])
+        blocks.append("\n".join([day[0]] + chunk))
+    if not blocks:
+        return [head + "\n" + ("No streams this week." if week.recap else "Nothing on the calendar.")]
+    if week.recap:
+        blocks.append(f"{week.stream_count} streams · {week.hours_live:.0f} hours live")
+    parts: List[str] = [head]
+    for blk in blocks:
+        if len(parts[-1] + "\n\n" + blk) > DISCORD_MAX:
+            parts.append(blk)
+        else:
+            parts[-1] += "\n\n" + blk
+    return parts
+
+
+def discord_text(week: Week) -> str:
+    """All of the Discord version in one string (tests, the web page); messages use discord_parts."""
+    return "\n\n".join(discord_parts(week))
 
 
 def _who(t: Tile, handles: Dict[int, str]) -> str:
@@ -283,4 +299,4 @@ def x_posts(week: Week, handles: Dict[int, str] | None = None, style: str = "rep
     return texts
 
 
-__all__ = ["discord_text", "x_posts", "x_len", "X_STYLES", "channel_url"]
+__all__ = ["discord_parts", "discord_text", "x_posts", "x_len", "X_STYLES", "channel_url"]

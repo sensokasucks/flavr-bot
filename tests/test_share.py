@@ -28,8 +28,11 @@ def test_discord_text_uses_time_stamps_and_quiet_links():
     t = discord_text(week())
     assert t.startswith("🗓️ **This week in FlaVR** · Nov 15 – 21")
     assert "<t:" in t and "](<https://youtu.be/v00>)" in t and len(t) <= 2000
-    big = discord_text(week(n_per_day=12))
-    assert len(big) <= 2000 and "more" in big
+    from flavrbot.share import discord_parts
+    parts = discord_parts(week(n_per_day=12))                   # 84 streams: nothing cut, several messages
+    assert len(parts) > 1 and all(len(p) <= 2000 for p in parts)
+    assert sum(p.count("✅") + p.count("•") for p in parts) == 84 and "more" not in "".join(parts)
+    assert all(not p.startswith("\n") for p in parts)
     assert "hours live" in discord_text(week(recap=True))
 
 
@@ -75,6 +78,7 @@ async def test_share_package_and_default_style():
     w.days[0][0].person_id = pid
     msgs = poster.share_messages(w)
     assert msgs[0].startswith("📋") and msgs[1].startswith("🗓️ **") and msgs[3].startswith("🔗 Links")
+    assert "the Discord version, then" in msgs[0]
     assert "@luluteala" not in msgs[2]                                  # nobody tagged by default
     store.put("share_x_tag", True)
     assert "@luluteala" in poster.share_messages(w)[2]

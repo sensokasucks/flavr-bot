@@ -115,8 +115,16 @@ def test_embed_text_fits_discord_and_page_draws():
     assert sum(len(n) + len(v) for n, v in e["fields"]) + len(e["title"]) + len(e["footer"]) <= 6000
     assert e["fields"][0][1].endswith("more")
     html = page(w, lambda u: "", logo="")
-    assert "+34 more" in html and "THIS WEEK" in html and "TODAY" in html
+    assert "+25 more" in html and 'class="day d1 past slim"' in html and "THIS WEEK" in html and "TODAY" in html
     assert "<script" not in html
+
+
+def test_each_day_fills_its_column():
+    """Sen's Nov 8-14 recap: Friday's 9 streams showed 6 + "+3 more" with a third of the column empty."""
+    from flavrbot.render import day_layout
+    assert day_layout(2) == ("big", 2) and day_layout(4) == ("row", 4) and day_layout(9) == ("row", 9)
+    assert day_layout(10) == ("slim", 10) and day_layout(16) == ("slim", 16)
+    assert day_layout(17) == ("slim", 15)               # 15 rows + the "+2 more" line
 
 
 def test_page_escapes_titles():

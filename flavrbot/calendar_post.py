@@ -51,14 +51,13 @@ from zoneinfo import ZoneInfo
 from .calendar import DAY_NAMES, Tile, Week, build_week, changes, week_start
 from .share import X_STYLES, channel_url, discord_parts, x_posts
 from .render import ImageCache, Screenshotter, logo_data_url, page
-from .store import GROUPS, Store
+from . import groups
+from .store import Store
 
 log = logging.getLogger("flavrbot.calendar_post")
 LIVE_REDRAW = 20 * 60.0         # while someone is live, redraw this often (fresh live preview)
 PING_BATCH = 10 * 60.0          # calendar pings: changes within this window arrive as one DM
 TICK = 60.0                     # how often the loop looks (a poke wakes it early)
-GROUP_NAMES = {"flavr": "FlaVR", "friends": "Friends"}
-GROUP_COLOURS = {"flavr": 0xF72CA2, "friends": 0x2AE0D4}
 DOTS = {"youtube": "▶️", "twitch": "🟣", "kick": "🟢"}
 FIELD_MAX = 1024                # Discord: one embed field's text
 EMBED_MAX = 5600                # Discord: 6000 for a whole embed, minus room for title / footer
@@ -95,10 +94,10 @@ def embed(week: Week) -> Dict[str, Any]:
     """The post's text as plain data (flavrbot/bot.py turns it into a discord.Embed):
     {title, colour, fields: [(name, value)], footer}. Days with nothing are left out; a day too
     long for one field ends with "+N more"."""
-    name = GROUP_NAMES.get(week.group, week.group.title())
-    title = (f"{name}: week in review · {week.range_text}" if week.recap
-             else f"This week in {name} · {week.range_text}" if week.group == "flavr"
-             else f"This week with {name.lower()} · {week.range_text}")
+    # recap posts keep their old "FlaVR: week in review" wording; previews read "This week in FlaVR" /
+    # "This week with Art Pals" (groups.heading, also used by share.py)
+    title = (f"{groups.name(week.group)}: week in review · {week.range_text}" if week.recap
+             else f"{groups.heading(week.group, False)} · {week.range_text}")
     fields: List[Tuple[str, str]] = []
     total = len(title)
     today = week.today_index()
@@ -125,7 +124,7 @@ def embed(week: Week) -> Dict[str, Any]:
         foot = "Times below are in your own time zone"
     if week.quiet:
         foot += (" · no streams: " if week.recap else " · nothing on yet: ") + ", ".join(week.quiet)
-    return {"title": title, "colour": GROUP_COLOURS.get(week.group, 0x2AE0D4), "fields": fields,
+    return {"title": title, "colour": groups.colour_int(week.group), "fields": fields,
             "footer": foot[:2000], "empty": not fields}
 
 
@@ -284,7 +283,7 @@ class CalendarPoster:
 
     async def tick(self) -> None:
         async with self._lock:
-            for g in GROUPS:
+            for g in groups.keys():         # FlaVR, Friends and any /group add ones
                 if self.store.get(f"calendar_channel.{g}"):
                     await self.refresh(g)
             self.images.prune()
@@ -309,7 +308,7 @@ class CalendarPoster:
             png = await self.png(week)
             if await self.discord.cal_send(channel, embed(week), png, f"recap-{this_week:%Y-%m-%d}.png"):
                 self.store.put(f"calendar_recap.{group}", this_week.date().isoformat())
-                self._note(f"{GROUP_NAMES.get(group, group)} week in review posted", png)
+                self._note(f"{groups.name(group)} week in review posted", png)
                 self._share_later(week, png)
 
         # which week the live board shows: a new post for a new week from Sunday PREVIEW_HOUR on
@@ -326,7 +325,7 @@ class CalendarPoster:
                                                           "message": str(msg), "sig": week.signature(), "drawn_at": now})
                 self._seen[group] = (this_week.date().isoformat(), {t.key: t for t in week.tiles()})
                 if new_week_due and posted_week:
-                    self._note(f"New {GROUP_NAMES.get(group, group)} week posted", png)
+                    self._note(f"New {groups.name(group)} week posted", png)
                     self._share_later(week, png)
             return
         await self._edit(group, post)
@@ -360,7 +359,7 @@ class CalendarPoster:
         self._seen[group] = (week_key, now_tiles)
         if not before or before[0] != week_key:
             return                              # first look since start, or a new week: no diff
-        prefix = "" if group == "flavr" else f"{GROUP_NAMES.get(group, group)}: "
+        prefix = "" if group == "flavr" else f"{groups.name(group)}: "
         for text in changes(before[1], now_tiles, self.tz):
             self._note(prefix + text)
 

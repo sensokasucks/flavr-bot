@@ -26,12 +26,12 @@ import unicodedata
 from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
+from . import groups
 from .calendar import DAY_NAMES, Tile, Week
 
 DISCORD_MAX = 2000          # one Discord message
 X_MAX = 280                 # one X post (weighted: see x_len)
 X_LINK = 23                 # X counts every link as 23 characters
-GROUP_NAMES = {"flavr": "FlaVR", "friends": "friends"}
 
 
 def x_len(text: str) -> int:
@@ -67,10 +67,7 @@ def _clean(text: str, n: int = 60) -> str:
 
 
 def _heading(week: Week) -> str:
-    name = GROUP_NAMES.get(week.group, week.group)
-    if week.recap:
-        return f"{name.capitalize() if name == 'friends' else name} week in review"
-    return f"This week in {name}" if week.group == "flavr" else f"This week with {name}"
+    return groups.heading(week.group, week.recap)
 
 
 def discord_parts(week: Week) -> List[str]:

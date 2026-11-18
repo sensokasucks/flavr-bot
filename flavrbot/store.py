@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 PLATFORMS = ("youtube", "twitch", "kick")      # also the main-platform fallback order
-GROUPS = ("flavr", "friends")
+GROUPS = ("flavr", "friends")             # the built-in two; more come from flavrbot/groups.py (/group add)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -160,10 +160,16 @@ class Store:
                              (key, json.dumps(value)))
             self._db.commit()
 
+    def delete(self, key: str) -> None:
+        """Forget a kv key (/group remove clears that group's channels and post)."""
+        with self._lock:
+            self._db.execute("DELETE FROM kv WHERE key=?", (key,))
+            self._db.commit()
+
     # ── people + accounts ──────────────────────────────────────────────
     def add_person(self, name: str, group: str = "flavr", is_owner: bool = False, added_by: str = "") -> int:
         """Add (or find) a person by name; returns their id. Group / owner flag are updated."""
-        group = group if group in GROUPS else "flavr"
+        group = group or "flavr"            # any group key (flavrbot/groups.py checks it in the commands)
         with self._lock:
             row = self._db.execute("SELECT id FROM people WHERE lower(name)=lower(?)", (name,)).fetchone()
             if row:
@@ -205,6 +211,19 @@ class Store:
         with self._lock:
             self._db.execute("UPDATE people SET hidden=? WHERE id=?", (int(hidden), person_id))
             self._db.commit()
+
+    def set_group(self, person_id: int, group: str) -> None:
+        """/friend group: move one person to another group key (flavrbot/groups.py)."""
+        with self._lock:
+            self._db.execute("UPDATE people SET grp=? WHERE id=?", (group, person_id))
+            self._db.commit()
+
+    def move_group(self, old: str, new: str) -> int:
+        """/group remove: everyone in ``old`` moves to ``new``; returns how many moved."""
+        with self._lock:
+            cur = self._db.execute("UPDATE people SET grp=? WHERE grp=?", (new, old))
+            self._db.commit()
+            return cur.rowcount
 
     def set_main(self, person_id: int, platform: str) -> None:
         with self._lock:

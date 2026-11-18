@@ -57,7 +57,7 @@ async def test_ai_summary_uses_ollama_and_fails_quietly():
     chat = [{"display_name": "Amy", "message": "boss!"}]
     assert await ai_summary("http://ai:11434", "llama3.2:3b", chat, post) == "Chat loved the boss fight. @​here"
     assert seen["url"] == "http://ai:11434/api/generate" and seen["body"]["model"] == "llama3.2:3b"
-    assert "Amy: boss!" in seen["body"]["prompt"]
+    assert "Amy: boss!" in seen["body"]["prompt"] and seen["body"]["options"]["num_ctx"] >= 8192
 
     async def broken(url, body):
         raise OSError("no route")

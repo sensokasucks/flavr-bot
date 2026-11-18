@@ -43,7 +43,9 @@ log = logging.getLogger("flavrbot.recap")
 
 TICK = 30.0                     # how often ``run`` looks (peak viewers, a due recap)
 TOP_CHATTERS = 5
-AI_LINES = 1200                 # chat lines given to the local AI at most (evenly spread over the stream)
+AI_LINES = 600                  # chat lines given to the local AI at most (evenly spread over the stream)
+AI_CONTEXT = 16384              # Ollama num_ctx (tokens): its default (2-4k) would silently cut the chat
+                                # short; 600 lines of up to 200 characters fit in this
 AI_TIMEOUT = 240.0              # a CPU model can be slow; the recap waits this long at most
 MONEY = ("superchat", "supersticker", "donation", "charity")
 PLATFORM_NAMES = {"twitch": "Twitch", "youtube": "YouTube", "kick": "Kick"}
@@ -160,7 +162,7 @@ async def ai_summary(url: str, model: str, chat: List[Dict[str, Any]], post: Opt
     prompt = ("These are chat messages from a livestream, oldest first. In 3 to 5 short, friendly sentences, "
               "say what the stream was about and the funniest or biggest moments chat reacted to. Plain text, "
               "no lists, no @ mentions, no made-up details.\n\n" + log_text)
-    body = {"model": model, "prompt": prompt, "stream": False}
+    body = {"model": model, "prompt": prompt, "stream": False, "options": {"num_ctx": AI_CONTEXT}}
     try:
         if post is None:
             import aiohttp

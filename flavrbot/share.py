@@ -130,14 +130,13 @@ def _x_day(i: int, week: Week, bold: bool = False) -> str:
     return "".join(BOLD.get(c, c) for c in text) if bold else text
 
 
-def _x_row(t: Tile, week: Week, handles: Dict[int, str], with_title: bool = False) -> str:
+def _x_row(t: Tile, week: Week, handles: Dict[int, str]) -> str:
     """One stream: "▸ 7 PM · @luluteala" (recap: "▸ 7 PM · @luluteala · 3 h")."""
     row = f"▸ {_ampm(t.at, week.tz)} · {_who(t, handles)}"
     if t.kind == "past" and t.end:
         hours = t.length / 3600
         row += f" · {hours:.1f} h".replace(".0 h", " h") if hours >= 1 else f" · {int(t.length // 60)} min"
-    what = _clean(t.title or t.game, 50) if with_title else ""
-    return row + (f" · {what}" if what else "")
+    return row
 
 
 def x_posts(week: Week, handles: Dict[int, str] | None = None, style: str = "reply", bold: bool = False,
@@ -166,7 +165,9 @@ def x_posts(week: Week, handles: Dict[int, str] | None = None, style: str = "rep
         for i, tiles in days:
             rows = [_x_day(i, week, bold)]
             for t in tiles:
-                rows.append(_x_row(t, week, handles, with_title=True))
+                # no stream titles on X: they're long, and their own #tags and @names would tag people
+                # and clutter the post (a busy week had 38 of them)
+                rows.append(_x_row(t, week, handles))
                 if _link(t):
                     rows.append(f"   {_link(t)}")
             blocks.append("\n".join(rows))

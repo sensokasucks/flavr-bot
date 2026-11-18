@@ -43,7 +43,7 @@ def test_x_reply_style_keeps_links_out_of_the_main_post():
 def test_x_one_post_has_everything():
     posts = x_posts(week(3), {}, "one")
     assert len(posts) == 1 and posts[0].count("https://") == 21
-    assert "▸ 7 PM · Streamer00 · Game night\n   https://youtu.be/v00" in posts[0]
+    assert "▸ 7 PM · Streamer00\n   https://youtu.be/v00" in posts[0] and "Game night" not in posts[0]
     recap = x_posts(week(1, recap=True), {}, "reply")[0]
     assert recap.startswith("📼 FlaVR week in review") and "▸ 7 PM · Streamer00 · 2 h" in recap
 

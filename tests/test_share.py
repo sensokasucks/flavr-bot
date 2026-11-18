@@ -145,10 +145,10 @@ def test_x_article_has_headings_links_and_no_tags():
     a = article(w, {0: "lulu"}, tags="#FlaVR", tag_people=False)
     assert a["title"] == "FlaVR week in review · Nov 15 – 21"
     assert a["html"].count("<h2>") == 1 + 7 and "<h2>Who streamed</h2>" in a["html"]
-    assert '<h2>Sunday, November 15</h2>' in a["html"] and '<a href="https://youtu.be/v00">▶ Watch the VOD</a>' in a["html"]
+    assert '<h2>Sunday, November 15</h2>' in a["html"] and '<a href="https://youtu.be/v00">VOD ↗</a>' in a["html"]
     assert "<script" not in a["html"] and re.search(r"@(?!​)", a["text"]) is None and "#FlaVR" in a["html"]
     assert "@lulu" in article(w, {0: "lulu"}, tag_people=True)["html"]             # only with tag_people on
-    assert "Stream page" in article(week(1))["html"] and article(week(1))["title"] == "This week in FlaVR · Nov 15 – 21"
+    assert "Page ↗" in article(week(1))["html"] and article(week(1))["title"] == "This week in FlaVR · Nov 15 – 21"
 
 
 def test_article_style_links_the_copy_page():
@@ -195,3 +195,26 @@ def test_cover_stats_line():
     assert cover_stats({"hours": 24.4, "streams": 6}, True) == "24h · 6 streams"
     assert cover_stats({"hours": 2.5, "streams": 1}, True) == "2.5h · 1 stream"
     assert cover_stats({"hours": 0, "streams": 3}, False) == "3 planned"
+
+
+def test_article_lines_are_tidy_with_short_links_and_one_follow_line():
+    """Sen's pick (2026-11-18): short "VOD ↗" links, titles without @names / #hashtags, "1h 54m"
+    lengths, one list per day, and one "Follow:" line at the end linking each person's channel."""
+    from flavrbot.share import article, article_length, article_title
+    assert article_title("Weeb Night with @batsharkvt") == "Weeb Night"
+    assert article_title("This Time Dark Sawrm #vtuber #flavr") == "This Time Dark Sawrm"
+    assert article_title("Red Dragon Inn w/ @zosimustarkas_vt") == "Red Dragon Inn"
+    assert article_title("dumb neko dies on overwatch with a cute piece of tofu @k1llert0fu_") ==         "dumb neko dies on overwatch with a cute…"
+    assert article_title("Raid <@123> and <#456> hi") == "Raid and hi"
+    assert article_title("@only #tags") == ""
+    assert [article_length(s) for s in (45 * 60, 5 * 3600, 6840, 3660)] == ["45m", "5h", "1h 54m", "1h 01m"]
+    w = week(2, recap=True)
+    w.days[0][0].title = "Weeb Night with @batsharkvt #vtuber"
+    a = article(w, channels={t.person_id: f"https://twitch.tv/p{t.person_id}" for d in w.days for t in d})
+    h = a["html"]
+    assert "batsharkvt" not in h and "#vtuber" not in h and "Weeb Night ·" in h
+    assert h.count("<ul>") == 1 + 7 and "<p><b>" not in h.split("<p><b>Follow:")[0]   # lists, not paragraphs
+    assert h.count("Follow:") == 1 and h.rindex("Follow:") > h.rindex("<h2>")
+    people = {t.person_id for d in w.days for t in d}
+    assert all(h.count(f'href="https://twitch.tv/p{p}"') == 1 for p in people)  # each person once
+    assert "Watch the VOD" not in h and " <a" in h                         # never wraps alone

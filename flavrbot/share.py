@@ -17,6 +17,8 @@ post to X by itself (X's API needs a paid plan), so it DMs the owner a package t
      links), which a Discord DM can't carry, so ``article`` builds an HTML page and the DM links to
      it (flavrbot/web.py /calendar/article, home network only); its Copy button copies the
      formatted text to paste into the Article editor, plus the title and the picture for the cover.
+     Each day is one bulleted list of short lines ("12:21a · Sensoka · Weeb Night · 5h · VOD ↗"),
+     titles without @names / #hashtags (article_title), and one "Follow:" line at the end.
 
 Who calls it: flavrbot/calendar_post.py ``CalendarPoster.share`` (after the Sunday post and the
 Saturday recap, when the /pings switch "share" is on, held until quiet hours end) and /calendar
@@ -316,24 +318,67 @@ def x_posts(week: Week, handles: Dict[int, str] | None = None, style: str = "rep
 
 # ── X Article (style "article") ──────────────────────────────────────────────
 def _link_label(t: Tile) -> str:
-    return {"past": "Watch the VOD", "live": "Watch live now", "scheduled": "Stream page"}.get(t.kind, "Watch")
+    """The X Article's short link words at the end of a stream's line ("VOD ↗"). The space before
+    the arrow is a no-break space, so the link never wraps onto a line of its own."""
+    word = {"past": "VOD", "live": "Live", "scheduled": "Page"}.get(t.kind, "Watch")
+    return word + NBSP + "↗"
+
+
+NBSP = " "
+ARTICLE_TITLE_MAX = 45      # characters of a stream title in the X Article (cut at a word)
+# @names, Discord mentions (<@123>, <@&123>, <#123>) and #hashtags inside stream titles: X turns
+# them into tags and hashtag links, so the X Article drops them (the week's hashtag line stays)
+_TITLE_TAGS = re.compile(r"<[@#][&!]?\d+>|[@＠]\w[\w.]*|(?<![\w&])#\w+")
+# words left dangling at the end once a name is gone: "Weeb Night with @batsharkvt" → "Weeb Night"
+_TITLE_TAIL = re.compile(r"(?:\s*[-–—|,:/&+]|\s+(?:with|w/|ft\.?|feat\.?|x|and|collab(?: with)?|vs\.?))+\s*$",
+                         re.IGNORECASE)
+
+
+def article_title(text: str, n: int = ARTICLE_TITLE_MAX) -> str:
+    """A stream title for the X Article: no @names / #hashtags, no dangling "with", cut at a word
+    near ``n`` characters with "…". "" when nothing is left (the line then has no title)."""
+    t = _TITLE_TAGS.sub(" ", text or "")
+    t = re.sub(r"\s+", " ", t).strip()
+    t = re.sub(r"[(\[【]\s*[)\]】]", "", t).strip()        # brackets that only held a tag
+    for _ in range(3):
+        t = _TITLE_TAIL.sub("", t).strip()
+    if len(t) > n:
+        cut = t[:n].rsplit(" ", 1)[0] if " " in t[:n] else t[:n]
+        t = _TITLE_TAIL.sub("", cut.rstrip(" ,.;:-–—")).strip() + "…"
+    return no_tags(t)
+
+
+def article_length(sec: float) -> str:
+    """Stream length for the X Article: "45m", "5h", "1h 54m"."""
+    m = int(round((sec or 0) / 60))
+    if m < 60:
+        return f"{m}m"
+    return f"{m // 60}h" + (f" {m % 60:02d}m" if m % 60 else "")
+
+
+def _short_time(ts: float, tz) -> str:
+    """"12:21a", "4p": the X Article's times (short, so a line rarely wraps)."""
+    d = datetime.fromtimestamp(ts, tz)
+    return f"{d.hour % 12 or 12}{':%02d' % d.minute if d.minute else ''}{'a' if d.hour < 12 else 'p'}"
 
 
 def article(week: Week, handles: Dict[int, str] | None = None, tags: str = "", tag_people: bool = False,
             channels: Dict[int, str] | None = None, save: Any = None) -> Dict[str, Any]:
     """The week as an X Article: {"title", "html", "text", "pictures"}. ``html`` is the body (no
     <html>): a summary line, a "Who streamed" list for the recap, then per day an <h2>, that day's
-    picture and one line per stream (bold "time · name", its title and length, and its link as words:
-    "▶ Watch the VOD"); then the hashtag line.
+    picture and that day's streams as one bulleted list (bold "time · name", a short title, its
+    length, and a short "VOD ↗" link: Sen picked this over "▶ Watch the VOD", which wrapped and
+    looked messy); then one "Follow:" line linking each person who appears to their channel
+    (``channels``: person id → channel_url), once at the end; then the hashtag line.
 
     X Articles allow only so many pictures, so it's one picture per day (render.day_card: that day's
     thumbnails in a grid), not one per stream. ``pictures``: [(number, zip file name, day index)].
     ``save``(day index) gives the bot's own address of that day's picture (flavrbot/web.py
     /calendar/day.png); it sits in a ``nocopy`` block (the Copy button leaves it out: X can't fetch
     pictures from the home network) with a Save link, to upload with X's picture button. "" or no
-    ``save`` = no picture block. ``text`` is plain text (fallback, tests). Titles are allowed (an
-    Article has room) with every @ defused; names become real @tags only with tag_people
-    (/setup share-style), the same rule as x_posts."""
+    ``save`` = no picture block. ``text`` is plain text (fallback, tests). Titles go through
+    ``article_title`` (no @names or #hashtags, cut near ARTICLE_TITLE_MAX); names become real @tags
+    only with tag_people (/setup share-style), the same rule as x_posts."""
     handles = (handles or {}) if tag_people else {}
     channels = channels or {}
     e = html.escape
@@ -345,6 +390,7 @@ def article(week: Week, handles: Dict[int, str] | None = None, tags: str = "", t
     parts = [f"<p>{e(summary)}</p>"]
     text = [title, summary]
     pictures: List[Any] = []
+    follow: Dict[int, str] = {}         # person id → name as shown, in order of first stream (the Follow line)
     if week.recap and week.tiles():
         rows = []
         for r in _recap_people(week):
@@ -362,17 +408,20 @@ def article(week: Week, handles: Dict[int, str] | None = None, tags: str = "", t
         rows = []
         text.append(head)
         for t in tiles:
-            bits = [_clean(t.title or t.game, 100)] if (t.title or t.game) else []
+            short = article_title(t.title or t.game)
+            bits = [short] if short else []
             if t.kind == "past" and t.end:
-                bits.append(f"{t.length / 3600:.1f} h".replace(".0 h", " h") if t.length >= 3600 else f"{int(t.length // 60)} min")
+                bits.append(article_length(t.length))
             if t.kind == "live":
                 bits.append("live now")
             url = _link(t) or channels.get(t.person_id, "")
             who = _who(t, handles)
-            link = f' · <a href="{e(url, quote=True)}">▶ {e(_link_label(t))}</a>' if url else ""
-            rows.append(f"<p><b>{e(_ampm(t.at, week.tz))} · {e(who)}</b>" + "".join(f" · {e(b)}" for b in bits)
-                        + link + "</p>")
-            text.append(f"• {_ampm(t.at, week.tz)} · {who}" + "".join(f" · {b}" for b in bits) + (f" · {url}" if url else ""))
+            if t.person_id not in follow:
+                follow[t.person_id] = who
+            when = _short_time(t.at, week.tz)
+            link = f' ·{NBSP}<a href="{e(url, quote=True)}">{e(_link_label(t))}</a>' if url else ""
+            rows.append(f"<li><b>{e(when)} · {e(who)}</b>" + "".join(f" · {e(b)}" for b in bits) + link + "</li>")
+            text.append(f"• {when} · {who}" + "".join(f" · {b}" for b in bits) + (f" · {url}" if url else ""))
         pics = []
         n = len(pictures) + 1
         name = f"{n:02d}-{DAY_NAMES[i][:3].lower()}.png"
@@ -384,9 +433,15 @@ def article(week: Week, handles: Dict[int, str] | None = None, tags: str = "", t
             pics = [f'<div class="nocopy"><img src="{e(local, quote=True)}" alt="{e(head)}">'
                     f'<p>Picture {n} · <a href="{e(local, quote=True)}" download="{name}">Save</a> · '
                     "put it here with X's picture button</p></div>"]
-        parts += [f"<h2>{e(head)}</h2>"] + pics + rows
+        # one tight list per day (separate <p>s left a big gap between every stream in X's editor)
+        parts += [f"<h2>{e(head)}</h2>"] + pics + ["<ul>" + "".join(rows) + "</ul>"]
     if not week.tiles():
         parts.append(f"<p>{'No streams this week.' if week.recap else 'Nothing scheduled yet.'}</p>")
+    # everyone who appears, once, linked to their channel (main platform first, see channel_url)
+    links = [(who, channels[pid]) for pid, who in follow.items() if channels.get(pid)]
+    if links:
+        parts.append("<p><b>Follow:</b> " + " · ".join(f'<a href="{e(u, quote=True)}">{e(w)}</a>' for w, u in links) + "</p>")
+        text.append("Follow: " + " · ".join(f"{w} {u}" for w, u in links))
     if tags.strip():
         parts.append(f"<p>{e(tags.strip())}</p>")
         text.append(tags.strip())

@@ -22,6 +22,7 @@ up to an hour to show the first time):
                         everywhere are typed with suggestions (autocomplete)
     /setup live-channel group channel                   where go-live posts go for a group
     /setup calendar-channel group channel               where the weekly calendar + recap go
+    /setup recap-channel [channel]   where the after-stream recap goes (flavrbot/recap.py; none = DM only)
     /calendar post [group]  a fresh calendar post now
     /calendar refresh [week]  fill a week in again from the channels' past streams (VODs)
     /calendar share [group] [week] [style]   DMs you copy-ready text for other Discords and X (flavrbot/share.py)
@@ -246,6 +247,15 @@ class FlavrBot(discord.Client):
             await (msg.pin() if on else msg.unpin())
         except discord.HTTPException as e:
             log.info("couldn't %s a talent card: %s", "pin" if on else "unpin", e)
+
+    async def post_text(self, channel_id: str, text: str) -> None:
+        """Plain text into a channel: the after-stream recap (flavrbot/recap.py, /setup recap-channel).
+        No pings and no link previews (the recap's VOD / clip links would each unfurl)."""
+        channel = self.get_channel(int(channel_id))
+        if channel is None:
+            log.info("recap channel %s not found (deleted, or the bot can't see it)", channel_id)
+            return
+        await channel.send(text[:2000], allowed_mentions=NO_PINGS, suppress_embeds=True)
 
     def is_owner_id(self, user: discord.abc.User) -> bool:
         return user.id == self.settings.owner_id
@@ -947,6 +957,16 @@ class FlavrBot(discord.Client):
             extra.append("tagging people's X handles" if bot.store.get("share_x_tag") else "nobody tagged")
             await inter.response.send_message(f"X text: {X_STYLES[style.value][1]}" + (f"; {', '.join(extra)}" if extra
                                               else "") + ".", ephemeral=True)
+
+        @setup.command(name="recap-channel", description="Where the after-stream recap goes (leave out to stop)")
+        async def setup_recap(inter: discord.Interaction, channel: Optional[discord.TextChannel] = None):
+            # kv recap_channel, read by flavrbot/recap.py when a recap is due; the owner's DM copy is /pings recap
+            if not await managers_only(inter):
+                return
+            bot.store.put("recap_channel", str(channel.id) if channel else "")
+            await inter.response.send_message(
+                f"After each stream, the recap goes to {channel.mention}." if channel else
+                "Recaps no longer go to a channel (your DM copy follows /pings recap).", ephemeral=True)
 
         @setup.command(name="mod-log", description="Where the mod log goes (deletes, edits, joins, bans, scams)")
         async def setup_mod_log(inter: discord.Interaction, channel: discord.TextChannel):

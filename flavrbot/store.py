@@ -23,6 +23,10 @@ Tables
             core_id is Core's own row id: the bot answers each push with the highest one it has
             (``chat_since``) and Core sends the lines after it, so a fresh or wiped copy fills
             itself in. chat_fts is its word index (SQLite FTS5) when the SQLite build has FTS5.
+  moments   chat moments Core spotted (fridge-stream-core/core/chat_moments.py "moment"): when,
+            how busy, the usual, and a Twitch clip link when Core made one. For the recap.
+  alerts    every alert Core sent (raids, subs, gifts, tips) as JSON, for the after-stream recap
+            (flavrbot/recap.py). Both are pruned after KEEP_EVENTS_DAYS.
 
 people.hidden (set with /friend hide) keeps someone off the calendar and recap; the go-live
 watcher still follows them. people.talent_channel / discord_user / live_group / live_own are the
@@ -107,6 +111,21 @@ CREATE TABLE IF NOT EXISTS chat (
   at REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS chat_at ON chat(at);
+CREATE TABLE IF NOT EXISTS moments (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at REAL NOT NULL,
+  cpm REAL NOT NULL DEFAULT 0,
+  baseline REAL NOT NULL DEFAULT 0,
+  clip TEXT NOT NULL DEFAULT '',
+  clip_error TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS moments_at ON moments(at);
+CREATE TABLE IF NOT EXISTS alerts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at REAL NOT NULL,
+  data TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS alerts_at ON alerts(at);
 CREATE TABLE IF NOT EXISTS manual_schedule (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
@@ -520,4 +539,42 @@ class Store:
     def chat_count(self) -> int:
         with self._lock:
             return int(self._db.execute("SELECT COUNT(*) AS n FROM chat").fetchone()["n"])
+
+    # ── moments + alerts (after-stream recap, flavrbot/recap.py) ───────
+    KEEP_EVENTS_DAYS = 120
+
+    def add_moment(self, m: Dict[str, Any]) -> None:
+        with self._lock:
+            self._db.execute("INSERT INTO moments(at, cpm, baseline, clip, clip_error) VALUES(?,?,?,?,?)",
+                             (float(m.get("at") or time.time()), float(m.get("cpm") or 0), float(m.get("baseline") or 0),
+                              str(m.get("clip") or ""), str(m.get("clip_error") or "")[:300]))
+            self._db.commit()
+
+    def add_alert(self, a: Dict[str, Any], at: Optional[float] = None) -> None:
+        with self._lock:
+            self._db.execute("INSERT INTO alerts(at, data) VALUES(?, ?)", (at or time.time(), json.dumps(a)))
+            self._db.execute("DELETE FROM alerts WHERE at < ?", (time.time() - self.KEEP_EVENTS_DAYS * 86400,))
+            self._db.execute("DELETE FROM moments WHERE at < ?", (time.time() - self.KEEP_EVENTS_DAYS * 86400,))
+            self._db.commit()
+
+    def moments_between(self, a: float, b: float) -> List[Dict[str, Any]]:
+        with self._lock:
+            return [dict(r) for r in self._db.execute("SELECT * FROM moments WHERE at >= ? AND at < ? ORDER BY at", (a, b))]
+
+    def alerts_between(self, a: float, b: float) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = [dict(r) for r in self._db.execute("SELECT * FROM alerts WHERE at >= ? AND at < ? ORDER BY at", (a, b))]
+        out = []
+        for r in rows:
+            try:
+                out.append({**json.loads(r["data"]), "at": r["at"]})
+            except ValueError:
+                continue
+        return out
+
+    def chat_between(self, a: float, b: float, limit: int = 0) -> List[Dict[str, Any]]:
+        """Chat copy lines in [a, b), oldest first (the recap's counts, top chatters, summary)."""
+        q = "SELECT * FROM chat WHERE at >= ? AND at < ? ORDER BY at" + (" LIMIT ?" if limit else "")
+        with self._lock:
+            return [dict(r) for r in self._db.execute(q, (a, b, limit) if limit else (a, b))]
 

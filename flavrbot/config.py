@@ -89,6 +89,12 @@ class Settings:
     warn_days: int = 30                 # warnings older than this stop counting
     warn_timeout_min: int = 1440        # that timeout, minutes (Discord's cap: 28 days)
     moments_hour: int = 10              # anniversaries / birthdays / Sunday growth DM at this hour (TZ)
+    # after-stream recap (flavrbot/recap.py): minutes after Core's "stream ended" before it is written
+    # (the last chat lines arrive), and an optional local AI (Ollama on this PC / home network) for a
+    # few sentences on what happened in chat; empty OLLAMA_URL = no AI, the recap is numbers + moments
+    recap_delay_min: int = 3
+    ollama_url: str = ""                # e.g. http://127.0.0.1:11434
+    ollama_model: str = "llama3.2:3b"
     # Storage
     data_dir: str = "/data"
     extra: Dict[str, str] = field(default_factory=dict)
@@ -140,6 +146,9 @@ def load(env: Optional[Mapping[str, str]] = None) -> Settings:
         warn_days=max(1, _int(env, "WARN_DAYS", 30)),
         warn_timeout_min=max(0, min(40320, _int(env, "WARN_TIMEOUT_MIN", 1440))),
         moments_hour=_int(env, "MOMENTS_HOUR", 10) % 24,
+        recap_delay_min=max(1, min(60, _int(env, "RECAP_DELAY_MIN", 3))),
+        ollama_url=g("OLLAMA_URL").rstrip("/"),
+        ollama_model=g("OLLAMA_MODEL", "llama3.2:3b"),
         data_dir=g("DATA_DIR", "/data"),
     )
 

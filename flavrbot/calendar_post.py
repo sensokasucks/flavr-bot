@@ -49,7 +49,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from .calendar import DAY_NAMES, Tile, Week, build_week, changes, week_start
-from .share import X_STYLES, channel_url, discord_text, x_posts
+from .share import X_STYLES, channel_url, discord_parts, x_posts
 from .render import ImageCache, Screenshotter, logo_data_url, page
 from .store import GROUPS, Store
 
@@ -232,11 +232,14 @@ class CalendarPoster:
         xs = x_posts(week, handles, style, bold=bool(self.store.get("share_x_bold")),
                      tags=str(self.store.get("share_x_tags") or ""), channels={p["id"]: channel_url(p) for p in people},
                      tag_people=bool(self.store.get("share_x_tag")))
-        after = {"reply": "the X post, then its links to paste as a reply." if len(xs) > 1 else "the X post.",
+        after = {"reply": f"the X post, then {len(xs) - 1} links post(s), one per day, to paste as replies."
+                 if len(xs) > 1 else "the X post.",
                  "one": "the X post.", "thread": f"an X thread of {len(xs)} posts." if len(xs) > 1 else "the X post."}
+        dc = discord_parts(week)
+        dc_what = "the Discord version" if len(dc) == 1 else f"the Discord version, one message per day ({len(dc)}, paste them in order)"
         note = ("📋 Copy-ready calendar. Long-press (phone) or right-click (PC) a message → Copy Text. "
-                "Next: the Discord version, then " + after.get(style, "the X post."))
-        return [note, discord_text(week)] + xs
+                f"Next: {dc_what}, then " + after.get(style, "the X post."))
+        return [note] + dc + xs
 
     async def share(self, group: str, offset: int = 0, style: str = "") -> bool:
         """/calendar share: DM the package for this (0), next (1) or last (-1, the recap) week now."""

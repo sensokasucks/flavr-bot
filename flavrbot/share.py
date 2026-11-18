@@ -13,6 +13,10 @@ post to X by itself (X's API needs a paid plan), so it DMs the owner a package t
      to paste as its reply (links in the main post lower its reach on X), everything in one long
      post (X Premium allows 25,000 characters), or a 280-character numbered thread without links.
      Each post is its own message.
+  4. an X Article (style "article"): X's long-form editor takes rich text (headings, bold, lists,
+     links), which a Discord DM can't carry, so ``article`` builds an HTML page and the DM links to
+     it (flavrbot/web.py /calendar/article, home network only); its Copy button copies the
+     formatted text to paste into the Article editor, plus the title and the picture for the cover.
 
 Who calls it: flavrbot/calendar_post.py ``CalendarPoster.share`` (after the Sunday post and the
 Saturday recap, when the /pings switch "share" is on, held until quiet hours end) and /calendar
@@ -21,6 +25,7 @@ share in flavrbot/bot.py.
 
 from __future__ import annotations
 
+import html
 import re
 import unicodedata
 from datetime import datetime, timedelta
@@ -125,6 +130,7 @@ X_STYLES = {
     "reply": ("Post + links replies", "the schedule as one post, then one links post per day to paste as replies"),
     "one": ("All in one post", "one long post with every stream and its link (needs X Premium past 280)"),
     "thread": ("280-character thread", "no X Premium: the schedule split into numbered posts, no links"),
+    "article": ("X Article", "a link to a page on the bot's web server to copy into X's Article editor"),
 }
 X_PREMIUM_MAX = 25000       # X Premium's longest post
 
@@ -308,4 +314,64 @@ def x_posts(week: Week, handles: Dict[int, str] | None = None, style: str = "rep
     return texts
 
 
-__all__ = ["discord_parts", "discord_text", "x_posts", "x_len", "X_STYLES", "channel_url"]
+# ── X Article (style "article") ──────────────────────────────────────────────
+def _link_label(t: Tile) -> str:
+    return {"past": "Watch the VOD", "live": "Watch live now", "scheduled": "Stream page"}.get(t.kind, "Watch")
+
+
+def article(week: Week, handles: Dict[int, str] | None = None, tags: str = "", tag_people: bool = False,
+            channels: Dict[int, str] | None = None) -> Dict[str, str]:
+    """The week as an X Article: {"title", "html", "text"}. ``html`` is the body (no <html>): a summary
+    line, a "Who streamed" list for the recap, then an <h2> per day with one <li> per stream (bold
+    time and name, the stream's title, its length, and its link as words, e.g. "Watch the VOD"),
+    then the hashtag line. ``text`` is the same as plain text (fallback, tests). Titles are allowed
+    here (an Article has room), with every @ defused like the rest of the share text; names become
+    real @tags only with tag_people (/setup share-style), same rule as x_posts."""
+    handles = (handles or {}) if tag_people else {}
+    channels = channels or {}
+    e = html.escape
+    title = f"{_heading(week)} · {week.range_text}"
+    if week.recap:
+        summary = f"{week.stream_count} streams · {week.hours_live:.0f} hours live · times in {_tz_name(week)}"
+    else:
+        summary = f"Times in {_tz_name(week)} · {sum(len(d) for d in week.days)} streams so far"
+    parts = [f"<p>{e(summary)}</p>"]
+    text = [title, summary]
+    if week.recap and week.tiles():
+        rows = []
+        for r in _recap_people(week):
+            hours = f"{r['hours']:.0f} h" if r["hours"] >= 1 else f"{r['hours'] * 60:.0f} min"
+            line = f"{_who(r['tile'], handles)} · {r['streams']} stream{'s' if r['streams'] != 1 else ''} · {hours}"
+            rows.append(f"<li><b>{e(_who(r['tile'], handles))}</b> · {e(line.split(' · ', 1)[1])}</li>")
+            text.append("• " + line)
+        parts += ["<h2>Who streamed</h2>", "<ul>" + "".join(rows) + "</ul>"]
+        text.insert(2, "Who streamed")
+    for i, tiles in enumerate(week.days):
+        if not tiles:
+            continue
+        date = week.start + timedelta(days=i)
+        head = f"{date:%A}, {date:%B} {date.day}"
+        rows = []
+        text.append(head)
+        for t in tiles:
+            bits = [_clean(t.title or t.game, 100)] if (t.title or t.game) else []
+            if t.kind == "past" and t.end:
+                bits.append(f"{t.length / 3600:.1f} h".replace(".0 h", " h") if t.length >= 3600 else f"{int(t.length // 60)} min")
+            if t.kind == "live":
+                bits.append("live now")
+            url = _link(t) or channels.get(t.person_id, "")
+            who = _who(t, handles)
+            link = f' · <a href="{e(url, quote=True)}">{e(_link_label(t))}</a>' if url else ""
+            rows.append(f"<li><b>{e(_ampm(t.at, week.tz))} · {e(who)}</b>"
+                        + "".join(f" · {e(b)}" for b in bits) + link + "</li>")
+            text.append(f"• {_ampm(t.at, week.tz)} · {who}" + "".join(f" · {b}" for b in bits) + (f" · {url}" if url else ""))
+        parts += [f"<h2>{e(head)}</h2>", "<ul>" + "".join(rows) + "</ul>"]
+    if not week.tiles():
+        parts.append(f"<p>{'No streams this week.' if week.recap else 'Nothing scheduled yet.'}</p>")
+    if tags.strip():
+        parts.append(f"<p>{e(tags.strip())}</p>")
+        text.append(tags.strip())
+    return {"title": title, "html": "\n".join(parts), "text": "\n".join(text)}
+
+
+__all__ = ["discord_parts", "discord_text", "x_posts", "x_len", "X_STYLES", "channel_url", "article"]

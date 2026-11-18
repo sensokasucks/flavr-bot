@@ -89,6 +89,7 @@ async def main() -> int:
                                 hold=lambda text: pinger.ping("calendar", text), backfill=watcher.backfill,
                                 share_on=lambda: pinger.switches().get("share", False))
         bot.calendar = poster
+        poster.web_url = s.web_address or web_address(s.listen_port)    # the X Article link in share DMs
         link.extra_routes.append(lambda app: add_routes(app, poster))
 
         # go-live posts first, then a nudge so the calendar redraws within seconds
@@ -158,6 +159,19 @@ async def main() -> int:
             await shooter.close()
             await bot.close()
     return 0
+
+
+def web_address(port: int) -> str:
+    """This PC's home network address as "http://192.168.0.20:3870". A UDP "connect" sends nothing; it
+    only asks the system which address it would use (the stack uses host networking, so this is the
+    Linux PC's own). Falls back to a placeholder the owner can read; WEB_ADDRESS overrides it."""
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as so:
+            so.connect(("10.255.255.255", 1))
+            return f"http://{so.getsockname()[0]}:{port}"
+    except OSError:
+        return f"http://<this PC>:{port}"
 
 
 if __name__ == "__main__":

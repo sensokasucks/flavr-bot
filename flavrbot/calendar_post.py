@@ -230,7 +230,8 @@ class CalendarPoster:
         people = self.store.people(week.group)
         handles = {p["id"]: p.get("x_handle") or "" for p in people}
         xs = x_posts(week, handles, style, bold=bool(self.store.get("share_x_bold")),
-                     tags=str(self.store.get("share_x_tags") or ""), channels={p["id"]: channel_url(p) for p in people})
+                     tags=str(self.store.get("share_x_tags") or ""), channels={p["id"]: channel_url(p) for p in people},
+                     tag_people=bool(self.store.get("share_x_tag")))
         after = {"reply": "the X post, then its links to paste as a reply." if len(xs) > 1 else "the X post.",
                  "one": "the X post.", "thread": f"an X thread of {len(xs)} posts." if len(xs) > 1 else "the X post."}
         note = ("📋 Copy-ready calendar. Long-press (phone) or right-click (PC) a message → Copy Text. "

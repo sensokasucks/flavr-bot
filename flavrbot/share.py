@@ -52,9 +52,18 @@ def _tz_name(week: Week) -> str:
     return datetime.fromtimestamp(week.start.timestamp() + 86400, week.tz).tzname() or ""
 
 
+ZWSP = "\u200b"             # zero-width space: invisible, but "@\u200bname" no longer tags anyone
+
+
+def no_tags(text: str) -> str:
+    """Make pasted text tag nobody, on Discord or X: a zero-width space after every @ ("@everyone",
+    "@here", "@name", Discord's <@123> / <@&123> codes). Looks the same; nobody gets a notification."""
+    return (text or "").replace("@", "@" + ZWSP)
+
+
 def _clean(text: str, n: int = 60) -> str:
     t = re.sub(r"\s+", " ", (text or "").replace("[", "(").replace("]", ")").replace("`", "'")).strip()
-    return t if len(t) <= n else t[: n - 1].rstrip() + "…"
+    return no_tags(t if len(t) <= n else t[: n - 1].rstrip() + "…")
 
 
 def _heading(week: Week) -> str:
@@ -78,7 +87,7 @@ def discord_text(week: Week) -> str:
             what = _clean(t.title or t.game)
             mark = {"past": "✅", "live": "🔴", "scheduled": "•"}[t.kind]
             link = f" [{'VOD' if t.kind == 'past' else 'watch'}](<{t.url}>)" if t.url else ""
-            day.append(f"{mark} {when} **{t.name}**" + (f" · {what}" if what else "") + link)
+            day.append(f"{mark} {when} **{no_tags(t.name)}**" + (f" · {what}" if what else "") + link)
         block = "\n".join(day)
         if len("\n".join(lines)) + len(block) + 20 > DISCORD_MAX:
             lines.append(f"\n+{rest} more")
@@ -93,8 +102,10 @@ def discord_text(week: Week) -> str:
 
 
 def _who(t: Tile, handles: Dict[int, str]) -> str:
+    """The name on X: a real @tag only for handles x_posts kept (tag_people on), else their name
+    with any @ in it defused."""
     h = (handles.get(t.person_id) or "").strip().lstrip("@")
-    return f"@{h}" if h else t.name
+    return f"@{h}" if h else no_tags(t.name)
 
 
 X_STYLES = {
@@ -201,18 +212,22 @@ def _recap_posts(week: Week, head: str, handles: Dict[int, str], channels: Dict[
 
 
 def x_posts(week: Week, handles: Dict[int, str] | None = None, style: str = "reply", bold: bool = False,
-            tags: str = "", channels: Dict[int, str] | None = None) -> List[str]:
+            tags: str = "", channels: Dict[int, str] | None = None, tag_people: bool = False) -> List[str]:
     """The X version as a list of posts to paste in order. ``handles``: person id → X handle
     (/friend x). ``style`` (X_STYLES): "reply" = schedule post + links reply, "one" = one long post
     with links, "thread" = 280-character numbered thread without links.
 
     X shows no markdown (asterisks would print as they are), so the look comes from layout alone:
     a two-line heading, then a block per day (a "SUN · NOV 15" heading, one "▸ 7 PM · name" line per
-    stream) with a blank line between blocks. Links go on their own lines. ``bold``: bold-looking day
+    stream) with a blank line between blocks. Links go on their own lines. ``tag_people``: the /friend x
+    handles as real @tags (default off: names, nobody notified). ``bold``: bold-looking day
     headings; ``tags``: a hashtag line at the end of the schedule post (/setup share-style).
     The week in review is a per-person summary instead (``_recap_posts``); ``channels``: person id →
     their main channel's page, the one link per person there."""
-    handles = handles or {}
+    # Tags: the X handles saved with /friend x become real @tags only with tag_people on (/setup
+    # share-style); off (the default) = everyone by their name. @s inside names and titles are
+    # always defused (no_tags), so nothing pasted tags anyone by accident.
+    handles = (handles or {}) if tag_people else {}
     if week.recap:
         head = (f"📼 {_heading(week)}\n{week.range_text} · {week.stream_count} streams · "
                 f"{week.hours_live:.0f} hours live")

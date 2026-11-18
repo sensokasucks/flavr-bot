@@ -23,7 +23,7 @@ up to an hour to show the first time):
     /calendar share [group] [week] [style]   DMs you copy-ready text for other Discords and X (flavrbot/share.py)
     /setup share-style style [bold_days] [hashtags]   the X text's default layout (post + links reply /
                         one post / 280 thread), bold-looking day headings, a hashtag line
-    /friend x name handle   their X handle, so the X text tags them ("-" removes it)
+    /friend x name handle   their X handle ("-" removes it); tagged only with /setup share-style tag_people
   Server care (flavrbot/server_care.py; owner or Manage Server)
     /setup mod-log channel    where the mod log goes      /setup check   what the bot still needs
     /roles add role [label] [emoji] | remove role | list | post channel [title] [text]   role buttons
@@ -693,14 +693,18 @@ class FlavrBot(discord.Client):
         @setup.command(name="share-style", description="Default layout of the copy-ready X text")
         @app_commands.choices(style=[app_commands.Choice(name=label, value=k) for k, (label, _) in X_STYLES.items()])
         @app_commands.describe(bold_days="Day headings in bold-looking letters (screen readers skip them)",
-                               hashtags="A line at the end, like #FlaVR #vtuber (- removes it)")
+                               hashtags="A line at the end, like #FlaVR #vtuber (- removes it)",
+                               tag_people="Turn the X handles from /friend x into real tags (default off)")
         async def setup_share_style(inter: discord.Interaction, style: app_commands.Choice[str],
-                                    bold_days: Optional[bool] = None, hashtags: Optional[str] = None):
+                                    bold_days: Optional[bool] = None, hashtags: Optional[str] = None,
+                                    tag_people: Optional[bool] = None):
             if not await owner_only(inter):
                 return
             bot.store.put("share_x_style", style.value)
             if bold_days is not None:
                 bot.store.put("share_x_bold", bold_days)
+            if tag_people is not None:
+                bot.store.put("share_x_tag", tag_people)
             if hashtags is not None:
                 tags = " ".join(t if t.startswith("#") else "#" + t for t in hashtags.replace(",", " ").split()
                                 if t not in ("-", "none"))
@@ -710,6 +714,7 @@ class FlavrBot(discord.Client):
                 extra.append("bold day headings")
             if bot.store.get("share_x_tags"):
                 extra.append(f"ending with {bot.store.get('share_x_tags')}")
+            extra.append("tagging people's X handles" if bot.store.get("share_x_tag") else "nobody tagged")
             await inter.response.send_message(f"X text: {X_STYLES[style.value][1]}" + (f"; {', '.join(extra)}" if extra
                                               else "") + ".", ephemeral=True)
 

@@ -32,7 +32,10 @@ Who calls it: flavrbot/__main__.py builds one and runs ``run()``; the watcher's 
 scheduled callbacks call ``poke()``; flavrbot/bot.py's /calendar and /setup calendar-channel use
 ``view_png``, ``embed`` and ``refresh``. ``discord`` is the bot (FlavrBot): it must offer
 ``cal_send(channel, embed, png, name)`` → message id or "", ``cal_edit(channel, message, embed,
-png, name)`` → True/False, ``dm_owner(text, png=None)`` and ``dm_share(messages, png)``.
+png, name)`` → True/False, ``dm_owner(text, png=None)`` and ``dm_share(messages, png, user_id=0)``;
+``cal_pin(channel, message, on)`` is optional (talent week cards are pinned with it).
+
+Talent channels (flavrbot/talent.py): ``tick`` also keeps each person's own week card and recap.
 
 Share (flavrbot/share.py): after the Sunday post and the Saturday recap, when the /pings switch
 "share" is on, the owner gets copy-ready text for other Discords and X (held until quiet hours
@@ -51,7 +54,7 @@ from zoneinfo import ZoneInfo
 from .calendar import DAY_NAMES, Tile, Week, build_week, changes, week_start
 from .share import X_STYLES, article, channel_url, discord_parts, x_posts
 from .render import COVER_H, COVER_W, ImageCache, Screenshotter, cover, day_card, logo_data_url, page
-from . import groups
+from . import groups, talent
 from .store import Store
 
 log = logging.getLogger("flavrbot.calendar_post")
@@ -287,6 +290,24 @@ class CalendarPoster:
         week = self.build(group, start, recap=offset < 0)
         return await self._send_share(week, await self.png(week), style)
 
+    async def share_person(self, person: Dict[str, Any], offset: int = 0, user_id: int = 0) -> bool:
+        """/me share and /calendar share in a talent channel (flavrbot/talent.py): the package for one
+        person's week, DMed to ``user_id`` (the one who asked; 0 = the owner). No picture (the board
+        with one person on it is mostly empty) and never the X Article style (its page shows a whole
+        group): the saved X style, else "reply"."""
+        start = self.week_of(offset)
+        if offset < 0:
+            await self.ensure_backfill(start)
+        week = talent.only(self.build(person.get("grp") or "flavr", start, recap=offset < 0), person["id"])
+        style = self.store.get("share_x_style") or "reply"
+        style = "reply" if style == "article" else style
+        try:
+            await self.discord.dm_share(self.share_messages(week, style), None, user_id=user_id)
+            return True
+        except Exception:
+            log.exception("talent share DM failed")
+            return False
+
     async def _send_share(self, week: Week, png: Optional[bytes], style: str = "") -> bool:
         try:
             await self.discord.dm_share(self.share_messages(week, style), png)
@@ -325,6 +346,7 @@ class CalendarPoster:
             for g in groups.keys():         # FlaVR, Friends and any /group add ones
                 if self.store.get(f"calendar_channel.{g}"):
                     await self.refresh(g)
+            await talent.refresh_all(self)  # each talent channel's week card + recap (flavrbot/talent.py)
             self.images.prune()
             await self.flush_pings()
             await self.flush_shares()

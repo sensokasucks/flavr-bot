@@ -20,7 +20,8 @@ Tables
             API; anyone else who doesn't use their platform's schedule).
 
 people.hidden (set with /friend hide) keeps someone off the calendar and recap; the go-live
-watcher still follows them.
+watcher still follows them. people.talent_channel / discord_user / live_group / live_own are the
+talent channel settings (flavrbot/talent.py; see ADDED_COLUMNS).
 
 All calls are synchronous and quick; async code runs them with ``asyncio.to_thread`` where it
 matters (the watcher), or directly for single-row reads (commands).
@@ -117,6 +118,17 @@ ADDED_COLUMNS = (
     ("sessions", "source", "TEXT NOT NULL DEFAULT ''"),
     # the person's X / Twitter handle (/friend x), used by the copy-ready X text (flavrbot/share.py)
     ("people", "x_handle", "TEXT NOT NULL DEFAULT ''"),
+    # talent channels (flavrbot/talent.py, /talent and /me): the person's own Discord channel ("" = none),
+    # their linked Discord account (user id as text, "" = none; lets them run /me for themself), and
+    # where their go-live card goes: live_group 1 = the group's live channel too (/setup live-channel),
+    # live_own 1 = their own channel too. Both default on; either can be switched off (Sen 2026-11-18).
+    ("people", "talent_channel", "TEXT NOT NULL DEFAULT ''"),
+    ("people", "discord_user", "TEXT NOT NULL DEFAULT ''"),
+    ("people", "live_group", "INTEGER NOT NULL DEFAULT 1"),
+    ("people", "live_own", "INTEGER NOT NULL DEFAULT 1"),
+    # go-live cards beyond the first (post_channel / post_message): JSON [[channel, message], ...], so
+    # the card in a talent's own channel is edited and ended with the group one (flavrbot/bot.py)
+    ("sessions", "extra_posts", "TEXT NOT NULL DEFAULT '[]'"),
 )
 
 
@@ -224,6 +236,18 @@ class Store:
             cur = self._db.execute("UPDATE people SET grp=? WHERE grp=?", (new, old))
             self._db.commit()
             return cur.rowcount
+
+    TALENT_FIELDS = ("talent_channel", "discord_user", "live_group", "live_own")
+
+    def set_talent(self, person_id: int, **fields: Any) -> None:
+        """/talent and /me (flavrbot/talent.py): change any of TALENT_FIELDS for one person."""
+        fields = {k: v for k, v in fields.items() if k in self.TALENT_FIELDS}
+        if not fields:
+            return
+        with self._lock:
+            self._db.execute(f"UPDATE people SET {', '.join(k + '=?' for k in fields)} WHERE id=?",
+                             (*fields.values(), person_id))
+            self._db.commit()
 
     def set_main(self, person_id: int, platform: str) -> None:
         with self._lock:

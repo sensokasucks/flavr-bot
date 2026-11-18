@@ -41,6 +41,12 @@ up to an hour to show the first time):
     /live-mode add|remove channel | slowmode seconds | voice [channel] | show   while you're live
     /setup starboard channel [emoji] [count]     /setup moments channel [role]     /birthday set|remove
     /growth                   joins and leaves, the last 4 weeks
+  Talent channels (flavrbot/talent.py)
+    /talent channel name [channel] | link name [user] | options name [group_channel] [own_channel] | list
+                        someone's own channel: go-live cards there too, a pinned week card, their recap;
+                        /live, /schedule, /calendar view|share used there show only them
+    /me schedule day time [title] | unschedule | main platform | x handle | hide [hidden] |
+        posts [group_channel] [own_channel] | share [week]     the linked person's own entry
   Owner only (answers only you can see)
     /status             Stream Core, the stream, this PC, the watcher
     /wake               Wake-on-LAN the stream PC
@@ -54,6 +60,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import re
 import time
@@ -69,6 +76,7 @@ from .config import Settings
 from .server_care import MAX_ROLE_BUTTONS, ServerCare, missing
 from .community import Community, missing_more
 from . import community as community_cmds
+from . import talent
 from .core_link import CoreLink
 from .pings import KINDS, Pinger, length
 from .share import X_STYLES
@@ -181,10 +189,12 @@ class FlavrBot(discord.Client):
         files = [discord.File(io.BytesIO(png), filename="calendar.png")] if png else []
         await user.send(text, files=files, allowed_mentions=NO_PINGS)
 
-    async def dm_share(self, messages: List[str], png: Optional[bytes] = None) -> None:
+    async def dm_share(self, messages: List[str], png: Optional[bytes] = None, user_id: int = 0) -> None:
         """flavrbot/calendar_post.py's share package: the picture with the first message, then one DM
-        per text so each copies on its own. No link previews (they'd hide the text on a phone)."""
-        user = self.get_user(self.settings.owner_id) or await self.fetch_user(self.settings.owner_id)
+        per text so each copies on its own. No link previews (they'd hide the text on a phone).
+        ``user_id``: who gets it (a talent's own share, flavrbot/talent.py); 0 = the owner."""
+        uid = int(user_id or self.settings.owner_id)
+        user = self.get_user(uid) or await self.fetch_user(uid)
         for i, text in enumerate(messages):
             files = [discord.File(io.BytesIO(png), filename="calendar.png")] if png and i == 0 else []
             await user.send(text[:2000], files=files, allowed_mentions=NO_PINGS, suppress_embeds=True)
@@ -222,6 +232,18 @@ class FlavrBot(discord.Client):
         except discord.HTTPException as e:
             log.warning("calendar edit failed: %s", e)
             return True         # a hiccup, not a deleted post: keep it and try again next change
+
+    async def cal_pin(self, channel_id: str, message_id: str, on: bool) -> None:
+        """Pin (or unpin) a post: a talent's week card (flavrbot/talent.py). Needs the bot's Pin
+        Messages / Manage Messages permission in that channel; without it the card just isn't pinned."""
+        channel = self.get_channel(int(channel_id))
+        if channel is None:
+            return
+        try:
+            msg = channel.get_partial_message(int(message_id))
+            await (msg.pin() if on else msg.unpin())
+        except discord.HTTPException as e:
+            log.info("couldn't %s a talent card: %s", "pin" if on else "unpin", e)
 
     def is_owner_id(self, user: discord.abc.User) -> bool:
         return user.id == self.settings.owner_id
@@ -295,46 +317,65 @@ class FlavrBot(discord.Client):
         return e
 
     async def post_start(self, person, session, live_on) -> Tuple[str, str]:
-        channel_id = self.store.get(f"live_channel.{person.get('grp') or 'flavr'}")
+        """The go-live card, in every place talent.live_channels picks: the group's live channel and
+        the person's own talent channel (either can be switched off per person). Returns the first
+        post (the watcher saves it as post_channel / post_message); the others are saved in the
+        session's extra_posts, so post_change / post_end update every copy."""
         main = main_platform(person, live_on)
         if not person.get("is_owner"):
             self.pinger.friend_live(person["name"], PLATFORM_ICONS.get(main, main))
-        if not channel_id:
+        posted: List[List[str]] = []
+        for channel_id in talent.live_channels(self.store, person):
+            channel = self.get_channel(int(channel_id))
+            if channel is None:
+                continue
+            try:
+                msg = await channel.send(embed=self.live_embed(person, session, live_on), allowed_mentions=NO_PINGS)
+            except discord.HTTPException as e:
+                log.warning("go-live post in %s failed: %s", channel_id, e)
+                continue
+            posted.append([str(channel.id), str(msg.id)])
+        if not posted:
             return "", ""
-        channel = self.get_channel(int(channel_id))
-        if channel is None:
-            return "", ""
-        msg = await channel.send(embed=self.live_embed(person, session, live_on), allowed_mentions=NO_PINGS)
-        return str(channel.id), str(msg.id)
+        if len(posted) > 1 and session.get("id"):
+            self.store.update_session(session["id"], extra_posts=posted[1:])
+        return posted[0][0], posted[0][1]
 
-    async def _message(self, session) -> Optional[discord.Message]:
-        if not session.get("post_channel") or not session.get("post_message"):
-            return None
-        channel = self.get_channel(int(session["post_channel"]))
-        if channel is None:
-            return None
+    async def _messages(self, session) -> List[discord.Message]:
+        """Every copy of a session's go-live card that still exists (main post + extra_posts)."""
+        pairs = [[session.get("post_channel"), session.get("post_message")]]
         try:
-            return await channel.fetch_message(int(session["post_message"]))
-        except discord.HTTPException:
-            return None
+            pairs += json.loads(session.get("extra_posts") or "[]") if isinstance(session.get("extra_posts"), str) \
+                else list(session.get("extra_posts") or [])
+        except ValueError:
+            pass
+        out = []
+        for channel_id, message_id in pairs:
+            if not channel_id or not message_id:
+                continue
+            channel = self.get_channel(int(channel_id))
+            if channel is None:
+                continue
+            try:
+                out.append(await channel.fetch_message(int(message_id)))
+            except discord.HTTPException:
+                continue
+        return out
 
     async def post_change(self, person, session, live_on) -> None:
-        msg = await self._message(session)
-        if msg:
+        for msg in await self._messages(session):
             await msg.edit(embed=self.live_embed(person, session, live_on), allowed_mentions=NO_PINGS)
 
     async def post_end(self, person, session) -> None:
-        msg = await self._message(session)
-        if not msg:
-            return
-        e = msg.embeds[0] if msg.embeds else discord.Embed()
-        e.title = f"{person['name']} was live"
-        e.colour = ENDED_COLOUR
-        e.set_footer(text=f"Live for {length(float(session['ended_at']) - float(session['started_at']))}")
-        # the VOD the watcher found (flavrbot/watcher.py find_vod: Twitch archive / YouTube stream page)
-        if session.get("vod_url"):
-            e.add_field(name="VOD", value=f"[Watch the VOD]({session['vod_url']})", inline=False)
-        await msg.edit(embed=e, allowed_mentions=NO_PINGS)
+        for msg in await self._messages(session):
+            e = msg.embeds[0] if msg.embeds else discord.Embed()
+            e.title = f"{person['name']} was live"
+            e.colour = ENDED_COLOUR
+            e.set_footer(text=f"Live for {length(float(session['ended_at']) - float(session['started_at']))}")
+            # the VOD the watcher found (flavrbot/watcher.py find_vod: Twitch archive / YouTube stream page)
+            if session.get("vod_url"):
+                e.add_field(name="VOD", value=f"[Watch the VOD]({session['vod_url']})", inline=False)
+            await msg.edit(embed=e, allowed_mentions=NO_PINGS)
 
     # ── commands ───────────────────────────────────────────────────────
     def _register(self) -> None:
@@ -471,8 +512,12 @@ class FlavrBot(discord.Client):
         @tree.command(name="live", description="Who's live right now")
         async def live(inter: discord.Interaction):
             rows = bot.store.live_now()
+            here = talent.person_for_channel(bot.store, inter.channel_id)     # in a talent channel: only them
+            if here:
+                rows = [r for r in rows if r["person_id"] == here["id"]]
             if not rows:
-                await inter.response.send_message("Nobody on the list is live right now.", ephemeral=True)
+                await inter.response.send_message(f"{here['name']} isn't live right now." if here else
+                                                  "Nobody on the list is live right now.", ephemeral=True)
                 return
             lines = [f"🔴 **{r['name']}** for {length(time.time() - float(r['started_at']))}: [{r['title'] or 'live'}]({r['url']})"
                      for r in rows]
@@ -481,7 +526,9 @@ class FlavrBot(discord.Client):
         @tree.command(name="schedule", description="Upcoming streams (Twitch schedule and YouTube scheduled streams)")
         async def schedule(inter: discord.Interaction, name: Optional[str] = None):
             people = bot.store.people()
-            person = (bot.store.person(name) if name else next((p for p in people if p["is_owner"]), None))
+            # no name: the person whose talent channel this is (flavrbot/talent.py), else the owner
+            here = talent.person_for_channel(bot.store, inter.channel_id)
+            person = (bot.store.person(name) if name else here or next((p for p in people if p["is_owner"]), None))
             if not person:
                 await inter.response.send_message("Who? Add them with /friend add (or mark yourself with owner: True).",
                                                   ephemeral=True)
@@ -756,6 +803,21 @@ class FlavrBot(discord.Client):
             if not bot.calendar:
                 await inter.response.send_message("The calendar isn't running.", ephemeral=True)
                 return
+            here = talent.person_for_channel(bot.store, inter.channel_id)
+            if here and not group:
+                # in a talent channel: that person's week as the text card (flavrbot/talent.py)
+                off = week.value if week else 0
+                start = bot.calendar.week_of(off)
+                if off < 0:
+                    await inter.response.defer(ephemeral=True, thinking=True)
+                    await bot.calendar.ensure_backfill(start)
+                w = talent.only(bot.calendar.build(here.get("grp") or "flavr", start, recap=off < 0), here["id"])
+                card = make_embed(talent.week_card(w, here["name"]))
+                if inter.response.is_done():
+                    await inter.followup.send(embed=card, ephemeral=True, allowed_mentions=NO_PINGS)
+                else:
+                    await inter.response.send_message(embed=card, ephemeral=True, allowed_mentions=NO_PINGS)
+                return
             g = await pick_group(inter, group)          # answers "no such group" itself, so before the defer
             if g is None:
                 return
@@ -804,6 +866,14 @@ class FlavrBot(discord.Client):
         async def calendar_share(inter: discord.Interaction, group: Optional[str] = None,
                                  week: Optional[app_commands.Choice[int]] = None,
                                  style: Optional[app_commands.Choice[str]] = None):
+            here = talent.person_for_channel(bot.store, inter.channel_id)
+            if here and not group and bot.calendar and (bot.may_manage(inter) or here.get("discord_user") == str(inter.user.id)):
+                # in a talent channel: that person's own share text, DMed to whoever asked (flavrbot/talent.py)
+                await inter.response.defer(ephemeral=True, thinking=True)
+                ok = await bot.calendar.share_person(here, week.value if week else 0, inter.user.id)
+                await inter.followup.send("Sent to your DMs." if ok else "Couldn't DM you. Discord → this server → "
+                                          "Privacy Settings → allow direct messages.", ephemeral=True)
+                return
             if not await owner_only(inter):
                 return
             if not bot.calendar:
@@ -1022,3 +1092,4 @@ class FlavrBot(discord.Client):
         # round 2 commands live next to their code (flavrbot/community.py): /welcome, /lockdown, /warn,
         # /warnings, /modmail, /live-mode, /birthday, /growth and /setup modmail | starboard | moments
         community_cmds.register(tree, bot, managers_only)
+        talent.register(tree, bot, managers_only, day_choices, parse_time)     # /talent and /me

@@ -319,14 +319,27 @@ def _link_label(t: Tile) -> str:
     return {"past": "Watch the VOD", "live": "Watch live now", "scheduled": "Stream page"}.get(t.kind, "Watch")
 
 
+def picture_name(n: int, i: int, t: Tile) -> str:
+    """The file name of stream ``n``'s picture in the zip: "03-mon-lulu-teala.jpg" (numbered in the
+    article's order, so they're easy to insert one after another)."""
+    who = re.sub(r"[^a-z0-9]+", "-", unicodedata.normalize("NFKD", t.name).encode("ascii", "ignore").decode().lower())
+    return f"{n:02d}-{DAY_NAMES[i][:3].lower()}-{who.strip('-')[:30] or 'stream'}.jpg"
+
+
 def article(week: Week, handles: Dict[int, str] | None = None, tags: str = "", tag_people: bool = False,
-            channels: Dict[int, str] | None = None) -> Dict[str, str]:
-    """The week as an X Article: {"title", "html", "text"}. ``html`` is the body (no <html>): a summary
-    line, a "Who streamed" list for the recap, then an <h2> per day with one <li> per stream (bold
-    time and name, the stream's title, its length, and its link as words, e.g. "Watch the VOD"),
-    then the hashtag line. ``text`` is the same as plain text (fallback, tests). Titles are allowed
-    here (an Article has room), with every @ defused like the rest of the share text; names become
-    real @tags only with tag_people (/setup share-style), same rule as x_posts."""
+            channels: Dict[int, str] | None = None, save: Any = None) -> Dict[str, Any]:
+    """The week as an X Article: {"title", "html", "text", "pictures"}. ``html`` is the body (no
+    <html>): a summary line, a "Who streamed" list for the recap, then an <h2> per day and, per stream,
+    a bold "time · name" line with its title and length, its picture (the calendar tile's thumbnail:
+    VOD / live / box art, else the profile picture), and its link under the picture ("▶ Watch the
+    VOD"); then the hashtag line. ``pictures``: [(number, zip file name, picture URL)] in order.
+
+    Pictures use their public address (i.ytimg.com, static-cdn.jtvnw.net ...), so if X's editor keeps
+    pictures from pasted text it can fetch them. Editors often drop them, so each picture also gets a
+    "Picture N · Save" line marked ``nocopy`` (the copy button leaves those out); ``save``(url) gives
+    the bot's own cached copy for that link ("" = no line). ``text`` is plain text (fallback, tests).
+    Titles are allowed (an Article has room) with every @ defused; names become real @tags only with
+    tag_people (/setup share-style), the same rule as x_posts."""
     handles = (handles or {}) if tag_people else {}
     channels = channels or {}
     e = html.escape
@@ -337,6 +350,7 @@ def article(week: Week, handles: Dict[int, str] | None = None, tags: str = "", t
         summary = f"Times in {_tz_name(week)} · {sum(len(d) for d in week.days)} streams so far"
     parts = [f"<p>{e(summary)}</p>"]
     text = [title, summary]
+    pictures: List[Any] = []
     if week.recap and week.tiles():
         rows = []
         for r in _recap_people(week):
@@ -361,17 +375,26 @@ def article(week: Week, handles: Dict[int, str] | None = None, tags: str = "", t
                 bits.append("live now")
             url = _link(t) or channels.get(t.person_id, "")
             who = _who(t, handles)
-            link = f' · <a href="{e(url, quote=True)}">{e(_link_label(t))}</a>' if url else ""
-            rows.append(f"<li><b>{e(_ampm(t.at, week.tz))} · {e(who)}</b>"
-                        + "".join(f" · {e(b)}" for b in bits) + link + "</li>")
+            rows.append(f"<p class=\"s\"><b>{e(_ampm(t.at, week.tz))} · {e(who)}</b>" + "".join(f" · {e(b)}" for b in bits) + "</p>")
+            pic = t.thumb or t.avatar
+            if pic.startswith("https://"):
+                n = len(pictures) + 1
+                pictures.append((n, picture_name(n, i, t), pic))
+                rows.append(f'<p><img src="{e(pic, quote=True)}" alt="{e(t.name)}, {e(head)}"></p>')
+                local = save(pic) if save else ""
+                if local:
+                    rows.append(f'<p class="nocopy">Picture {n} · <a href="{e(local, quote=True)}" '
+                                f'download="{picture_name(n, i, t)}">Save</a></p>')
+            if url:
+                rows.append(f'<p><a href="{e(url, quote=True)}">▶ {e(_link_label(t))}</a></p>')
             text.append(f"• {_ampm(t.at, week.tz)} · {who}" + "".join(f" · {b}" for b in bits) + (f" · {url}" if url else ""))
-        parts += [f"<h2>{e(head)}</h2>", "<ul>" + "".join(rows) + "</ul>"]
+        parts += [f"<h2>{e(head)}</h2>"] + rows
     if not week.tiles():
         parts.append(f"<p>{'No streams this week.' if week.recap else 'Nothing scheduled yet.'}</p>")
     if tags.strip():
         parts.append(f"<p>{e(tags.strip())}</p>")
         text.append(tags.strip())
-    return {"title": title, "html": "\n".join(parts), "text": "\n".join(text)}
+    return {"title": title, "html": "\n".join(parts), "text": "\n".join(text), "pictures": pictures}
 
 
 __all__ = ["discord_parts", "discord_text", "x_posts", "x_len", "X_STYLES", "channel_url", "article"]

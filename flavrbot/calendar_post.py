@@ -50,7 +50,7 @@ from zoneinfo import ZoneInfo
 
 from .calendar import DAY_NAMES, Tile, Week, build_week, changes, week_start
 from .share import X_STYLES, article, channel_url, discord_parts, x_posts
-from .render import ImageCache, Screenshotter, logo_data_url, page
+from .render import COVER_H, COVER_W, ImageCache, Screenshotter, cover, logo_data_url, page
 from . import groups
 from .store import Store
 
@@ -192,6 +192,17 @@ class CalendarPoster:
         except Exception as e:
             self.errors["picture"] = str(e) or type(e).__name__
             log.warning("calendar picture failed: %s", self.errors["picture"])
+            return None
+
+    async def cover_png(self, week: Week) -> Optional[bytes]:
+        """The 5:2 X Article cover (render.cover), or None without Chromium. flavrbot/web.py serves it."""
+        if self.shooter is None:
+            return None
+        try:
+            await self.images.fetch_all(week)
+            return await self.shooter.png(cover(week, self.images.data_url, logo=logo_data_url()), (COVER_W, COVER_H))
+        except Exception as e:
+            log.warning("cover picture failed: %s", e)
             return None
 
     async def ensure_backfill(self, start: datetime, force: bool = False) -> int:

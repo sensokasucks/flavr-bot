@@ -33,7 +33,7 @@ import html
 import logging
 import mimetypes
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -352,22 +352,41 @@ COVER_PICS = 8                      # thumbnails on the cover (4 x 2)
 
 
 def cover_people(week: Week) -> list:
-    """Who goes on the cover: one tile per person, most hours first for the recap, else the order
-    they stream in; at most COVER_PICS."""
+    """Who goes on the cover, called by cover() below. One row per person, at most COVER_PICS:
+    {"tile": the stream whose picture is shown, "hours": hours live (past streams only),
+     "streams": how many streams that week (done in a recap, planned in a preview)}.
+    Order: recap = most hours first (ties: who streamed first), preview = order of first stream.
+    Picture: recap = the longest stream that has a thumbnail; preview = the first one with a thumbnail;
+    a person's profile picture only when none of their streams has a thumbnail. The numbers show
+    under each name on the cover (Sen asked 2026-11-18) so the order explains itself."""
     by: dict = {}
     for t in week.tiles():
-        r = by.setdefault(t.person_id, {"tile": t, "hours": 0.0, "first": t.at})
+        r = by.setdefault(t.person_id, {"tile": t, "hours": 0.0, "streams": 0, "first": t.at})
+        r["streams"] += 1
         r["hours"] += t.length / 3600 if t.kind == "past" else 0
-        if (t.thumb and not r["tile"].thumb) or (week.recap and t.length > r["tile"].length):
+        cur = r["tile"]
+        if t.thumb and not cur.thumb:                     # a thumbnail always beats none
             r["tile"] = t
+        elif week.recap and t.length > cur.length and (t.thumb or not cur.thumb):
+            r["tile"] = t                                 # longer stream, never trading a thumbnail away
     rows = sorted(by.values(), key=lambda r: (-r["hours"], r["first"]) if week.recap else (r["first"],))
-    return [r["tile"] for r in rows[:COVER_PICS]]
+    return rows[:COVER_PICS]
+
+
+def cover_stats(row: dict, recap: bool) -> str:
+    """The small line under a name on the cover: "24h · 6 streams" (recap) or "3 planned" (preview)."""
+    n = row["streams"]
+    if not recap:
+        return f"{n} planned"
+    h = row["hours"]
+    hours = f"{h:.0f}h" if h >= 10 else f"{h:.1f}".rstrip("0").rstrip(".") + "h"
+    return f"{hours} · {n} stream{'s' if n != 1 else ''}"
 
 
 def cover(week: Week, img: Img, logo: str = "") -> str:
     """The X Article cover, 1500 x 600, the board's look: logo (FlaVR) or group name, the board title,
     the dates and numbers on the left; the people's stream pictures (thumbnail, else profile picture)
-    with their names on the right. flavrbot/web.py /calendar/cover.png screenshots it."""
+    with their names and numbers (cover_stats) on the right. flavrbot/web.py /calendar/cover.png screenshots it."""
     e = html.escape
     if week.recap:
         stats = f"{week.stream_count} streams · {week.hours_live:.0f} hours live"
@@ -379,10 +398,12 @@ def cover(week: Week, img: Img, logo: str = "") -> str:
     if week.group != "flavr":
         title = "WEEK IN REVIEW" if week.recap else "THIS WEEK"
     pics = ""
-    for i, t in enumerate(cover_people(week)):
+    for i, row in enumerate(cover_people(week)):
+        t = row["tile"]
         src = img(t.thumb) or img(t.avatar)
         style = f' style="background-image:url(&quot;{e(src, quote=True)}&quot;)"' if src else ""
-        pics += f'<div class="p"><i class="c{i % 4}"{style}></i><span>{e(t.name)}</span></div>'
+        pics += (f'<div class="p"><i class="c{i % 4}"{style}></i><span>{e(t.name)}</span>'
+                 f'<em>{e(cover_stats(row, week.recap))}</em></div>')
     css = (":root{" + theme(week.group) + "}*{box-sizing:border-box;margin:0}"
            f"html,body{{background:#0e0f14}}body{{width:{COVER_W}px;height:{COVER_H}px;overflow:hidden;"
            'font-family:"DejaVu Sans","Noto Sans","Noto Sans CJK JP",Arial,sans-serif;color:#eef;display:flex;'
@@ -395,10 +416,69 @@ def cover(week: Week, img: Img, logo: str = "") -> str:
            ".g{flex:1;display:grid;grid-template-columns:repeat(4,1fr);gap:16px 14px}"
            ".p i{display:block;aspect-ratio:16/9;border-radius:12px;background:#1b1d26 center/cover no-repeat;"
            "border:3px solid var(--c1)}.p i.c1{border-color:var(--c2)}.p i.c2{border-color:var(--c3)}.p i.c3{border-color:var(--c4)}"
-           ".p span{display:block;font-size:17px;font-weight:700;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}")
+           ".p span{display:block;font-size:17px;font-weight:700;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+           ".p em{display:block;font-style:normal;font-size:15px;font-weight:700;color:var(--c4);margin-top:2px}")
     return (f'<!doctype html><html><head><meta charset="utf-8"><style>{css}</style></head><body>'
             f'<div class="l">{head}<h1>{e(title)}</h1><div class="d">{e(week.range_text)}</div>'
             f'<div class="s">{e(stats)}</div></div><div class="g">{pics}</div></body></html>')
+
+
+# ── one day as a picture (X Article: one picture per day) ──────────────
+DAY_MAX = 20                        # streams drawn on a day picture; past that "+N more" (the links list all)
+
+
+def day_columns(n: int) -> int:
+    """Grid columns for n streams on a 16:9 day picture (rows follow): 1, 2, 2, 2, 3 ... 5."""
+    return 1 if n <= 1 else 2 if n <= 4 else 3 if n <= 9 else 4 if n <= 16 else 5
+
+
+def day_card(week: Week, i: int, img: Img, logo: str = "") -> str:
+    """Day ``i`` of the week as a 1600 x 900 picture in the board's look: "SUNDAY · NOV 15" and the
+    group's title on top, then that day's streams in a grid (thumbnail, name, time and length). X
+    Articles allow only so many pictures, so the article uses one of these per day instead of one per
+    stream (flavrbot/share.py ``article``; flavrbot/web.py /calendar/day.png)."""
+    e = html.escape
+    tiles = week.days[i]
+    shown = tiles if len(tiles) <= DAY_MAX else tiles[:DAY_MAX - 1]
+    cols = day_columns(len(shown))
+    rows = max(1, -(-len(shown) // cols))
+    date = week.start + timedelta(days=i)
+    cells = ""
+    for k, t in enumerate(shown):
+        src = img(t.thumb) or img(t.avatar)
+        style = f' style="background-image:url(&quot;{e(src, quote=True)}&quot;)"' if src else ""
+        when = clock(t.at, week.tz) + (f" · {hm(t.length)}" if t.kind == "past" and t.end else
+                                       " · LIVE" if t.kind == "live" else "")
+        cells += (f'<div class="c"><i class="k{k % 4}"{style}>{_plats(t)}</i>'
+                  f'<b>{e(t.name)}</b><span>{e(when)}</span></div>')
+    if len(tiles) > len(shown):
+        cells += f'<div class="c more">+{len(tiles) - len(shown)} more</div>'
+    label = 24 if rows <= 2 else 20 if rows <= 3 else 16
+    head = (f'<img class="logo" src="{e(logo, quote=True)}">' if logo and week.group == "flavr" else
+            f"<em>{e(groups.name(week.group))}</em>")
+    css = (":root{" + theme(week.group) + "}*{box-sizing:border-box;margin:0}html,body{background:#0e0f14}"
+           f"body{{width:{WIDTH}px;height:{HEIGHT}px;overflow:hidden;padding:30px 40px;color:#eef;"
+           'font-family:"DejaVu Sans","Noto Sans","Noto Sans CJK JP",Arial,sans-serif;'
+           "background-image:radial-gradient(circle at 85% -10%,var(--glow1) 0,transparent 40%),"
+           "radial-gradient(circle at 0% 110%,var(--glow2) 0,transparent 40%)}"
+           "header{display:flex;align-items:center;gap:22px;height:70px;margin-bottom:20px}"
+           ".logo{height:60px;filter:drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff)} header em{font-style:normal;"
+           "font-size:34px;font-weight:800;color:var(--c4)} h1{font-size:46px;font-weight:800;letter-spacing:3px;color:var(--c1)}"
+           "header span{margin-left:auto;font-size:22px;color:#aab}"
+           f".g{{display:grid;grid-template-columns:repeat({cols},1fr);grid-template-rows:repeat({rows},1fr);gap:16px 18px;height:750px}}"
+           ".c{display:flex;flex-direction:column;min-height:0;min-width:0}"
+           ".c i{flex:1;min-height:0;border-radius:12px;background:#1b1d26 center/cover no-repeat;border:3px solid var(--c1);position:relative}"
+           ".c i.k1{border-color:var(--c2)}.c i.k2{border-color:var(--c3)}.c i.k3{border-color:var(--c4)}"
+           f".c b{{font-size:{label}px;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}"
+           f".c span{{font-size:{label - 4}px;color:#ccd;white-space:nowrap}}"
+           ".c.more{align-items:center;justify-content:center;font-size:28px;color:#aab}"
+           ".plat{position:absolute;top:8px;right:8px;width:26px;height:26px;border-radius:6px;font-size:14px;font-weight:800;"
+           "display:inline-flex;align-items:center;justify-content:center;margin-left:4px}"
+           ".c i .plat+.plat{right:38px}")
+    return (f'<!doctype html><html><head><meta charset="utf-8"><style>{css}</style></head><body>'
+            f'<header>{head}<h1>{e(f"{date:%A} · {date:%b}".upper())} {date.day}</h1>'
+            f'<span>{len(tiles)} stream{"s" if len(tiles) != 1 else ""}</span></header>'
+            f'<div class="g">{cells}</div></body></html>')
 
 
 # ── the picture ────────────────────────────────────────────────────────

@@ -319,27 +319,21 @@ def _link_label(t: Tile) -> str:
     return {"past": "Watch the VOD", "live": "Watch live now", "scheduled": "Stream page"}.get(t.kind, "Watch")
 
 
-def picture_name(n: int, i: int, t: Tile) -> str:
-    """The file name of stream ``n``'s picture in the zip: "03-mon-lulu-teala.jpg" (numbered in the
-    article's order, so they're easy to insert one after another)."""
-    who = re.sub(r"[^a-z0-9]+", "-", unicodedata.normalize("NFKD", t.name).encode("ascii", "ignore").decode().lower())
-    return f"{n:02d}-{DAY_NAMES[i][:3].lower()}-{who.strip('-')[:30] or 'stream'}.jpg"
-
-
 def article(week: Week, handles: Dict[int, str] | None = None, tags: str = "", tag_people: bool = False,
             channels: Dict[int, str] | None = None, save: Any = None) -> Dict[str, Any]:
     """The week as an X Article: {"title", "html", "text", "pictures"}. ``html`` is the body (no
-    <html>): a summary line, a "Who streamed" list for the recap, then an <h2> per day and, per stream,
-    a bold "time · name" line with its title and length, its picture (the calendar tile's thumbnail:
-    VOD / live / box art, else the profile picture), and its link under the picture ("▶ Watch the
-    VOD"); then the hashtag line. ``pictures``: [(number, zip file name, picture URL)] in order.
+    <html>): a summary line, a "Who streamed" list for the recap, then per day an <h2>, that day's
+    picture and one line per stream (bold "time · name", its title and length, and its link as words:
+    "▶ Watch the VOD"); then the hashtag line.
 
-    Pictures use their public address (i.ytimg.com, static-cdn.jtvnw.net ...), so if X's editor keeps
-    pictures from pasted text it can fetch them. Editors often drop them, so each picture also gets a
-    "Picture N · Save" line marked ``nocopy`` (the copy button leaves those out); ``save``(url) gives
-    the bot's own cached copy for that link ("" = no line). ``text`` is plain text (fallback, tests).
-    Titles are allowed (an Article has room) with every @ defused; names become real @tags only with
-    tag_people (/setup share-style), the same rule as x_posts."""
+    X Articles allow only so many pictures, so it's one picture per day (render.day_card: that day's
+    thumbnails in a grid), not one per stream. ``pictures``: [(number, zip file name, day index)].
+    ``save``(day index) gives the bot's own address of that day's picture (flavrbot/web.py
+    /calendar/day.png); it sits in a ``nocopy`` block (the Copy button leaves it out: X can't fetch
+    pictures from the home network) with a Save link, to upload with X's picture button. "" or no
+    ``save`` = no picture block. ``text`` is plain text (fallback, tests). Titles are allowed (an
+    Article has room) with every @ defused; names become real @tags only with tag_people
+    (/setup share-style), the same rule as x_posts."""
     handles = (handles or {}) if tag_people else {}
     channels = channels or {}
     e = html.escape
@@ -375,20 +369,22 @@ def article(week: Week, handles: Dict[int, str] | None = None, tags: str = "", t
                 bits.append("live now")
             url = _link(t) or channels.get(t.person_id, "")
             who = _who(t, handles)
-            rows.append(f"<p class=\"s\"><b>{e(_ampm(t.at, week.tz))} · {e(who)}</b>" + "".join(f" · {e(b)}" for b in bits) + "</p>")
-            pic = t.thumb or t.avatar
-            if pic.startswith("https://"):
-                n = len(pictures) + 1
-                pictures.append((n, picture_name(n, i, t), pic))
-                rows.append(f'<p><img src="{e(pic, quote=True)}" alt="{e(t.name)}, {e(head)}"></p>')
-                local = save(pic) if save else ""
-                if local:
-                    rows.append(f'<p class="nocopy">Picture {n} · <a href="{e(local, quote=True)}" '
-                                f'download="{picture_name(n, i, t)}">Save</a></p>')
-            if url:
-                rows.append(f'<p><a href="{e(url, quote=True)}">▶ {e(_link_label(t))}</a></p>')
+            link = f' · <a href="{e(url, quote=True)}">▶ {e(_link_label(t))}</a>' if url else ""
+            rows.append(f"<p><b>{e(_ampm(t.at, week.tz))} · {e(who)}</b>" + "".join(f" · {e(b)}" for b in bits)
+                        + link + "</p>")
             text.append(f"• {_ampm(t.at, week.tz)} · {who}" + "".join(f" · {b}" for b in bits) + (f" · {url}" if url else ""))
-        parts += [f"<h2>{e(head)}</h2>"] + rows
+        pics = []
+        n = len(pictures) + 1
+        name = f"{n:02d}-{DAY_NAMES[i][:3].lower()}.png"
+        pictures.append((n, name, i))
+        local = save(i) if save else ""
+        if local:
+            # the day picture lives on the bot (home network), which X can't fetch: it's on the page
+            # to save and upload with X's picture button, and the copy leaves it out (nocopy)
+            pics = [f'<div class="nocopy"><img src="{e(local, quote=True)}" alt="{e(head)}">'
+                    f'<p>Picture {n} · <a href="{e(local, quote=True)}" download="{name}">Save</a> · '
+                    "put it here with X's picture button</p></div>"]
+        parts += [f"<h2>{e(head)}</h2>"] + pics + rows
     if not week.tiles():
         parts.append(f"<p>{'No streams this week.' if week.recap else 'Nothing scheduled yet.'}</p>")
     if tags.strip():

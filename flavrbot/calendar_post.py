@@ -50,7 +50,7 @@ from zoneinfo import ZoneInfo
 
 from .calendar import DAY_NAMES, Tile, Week, build_week, changes, week_start
 from .share import X_STYLES, article, channel_url, discord_parts, x_posts
-from .render import COVER_H, COVER_W, ImageCache, Screenshotter, cover, logo_data_url, page
+from .render import COVER_H, COVER_W, ImageCache, Screenshotter, cover, day_card, logo_data_url, page
 from . import groups
 from .store import Store
 
@@ -203,6 +203,17 @@ class CalendarPoster:
             return await self.shooter.png(cover(week, self.images.data_url, logo=logo_data_url()), (COVER_W, COVER_H))
         except Exception as e:
             log.warning("cover picture failed: %s", e)
+            return None
+
+    async def day_png(self, week: Week, day: int) -> Optional[bytes]:
+        """Day ``day`` (0 = Sunday) as one 16:9 picture (render.day_card), for the X Article."""
+        if self.shooter is None:
+            return None
+        try:
+            await self.images.fetch_all(week)
+            return await self.shooter.png(day_card(week, day, self.images.data_url, logo=logo_data_url()))
+        except Exception as e:
+            log.warning("day picture failed: %s", e)
             return None
 
     async def ensure_backfill(self, start: datetime, force: bool = False) -> int:

@@ -1,6 +1,6 @@
 """The Discord client builds and registers every command (no Discord connection needed)."""
 
-from flavrbot import config
+from flavrbot import config, groups
 from flavrbot.bot import FlavrBot
 from flavrbot.core_link import CoreLink
 from flavrbot.pings import Pinger
@@ -11,13 +11,16 @@ from flavrbot.watcher import Watcher
 async def test_commands_register():
     s = config.load({"DISCORD_TOKEN": "t", "OWNER_ID": "1", "FLAVR_CORE_KEY": "k"})
     store = Store(":memory:")
+    groups.init(store)
     bot = FlavrBot(s, store, CoreLink(store, "k"), Pinger(store, None), Watcher(store, {}, {}))
     names = sorted(c.name for c in bot.tree.get_commands())
-    assert names == ["backup", "calendar", "friend", "live", "mod", "pings", "points", "queue", "roles", "schedule",
+    assert names == ["backup", "calendar", "friend", "group", "live", "mod", "pings", "points", "queue", "roles", "schedule",
                      "setup", "status", "wake"]
     friend = next(c for c in bot.tree.get_commands() if c.name == "friend")
-    assert sorted(c.name for c in friend.commands) == ["add", "hide", "import", "list", "main", "remove",
-                                                       "schedule", "unschedule", "x"]
+    assert sorted(c.name for c in friend.commands) == ["add", "group", "hide", "import", "list", "main",
+                                                       "remove", "schedule", "unschedule", "x"]
+    group = next(c for c in bot.tree.get_commands() if c.name == "group")
+    assert sorted(c.name for c in group.commands) == ["add", "edit", "list", "remove"]
     setup = next(c for c in bot.tree.get_commands() if c.name == "setup")
     assert sorted(c.name for c in setup.commands) == ["calendar-channel", "check", "live-channel", "mod-log",
                                                       "share-style"]

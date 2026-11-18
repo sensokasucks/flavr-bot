@@ -5,7 +5,8 @@ what is public anyway (stream titles and times). Never forward the port on the r
 
   GET /calendar                  this week's board as a live page (reloads every 5 minutes). Also
                                  the OBS Browser Source: 1600 x 900, ?group=friends for the friends
-                                 board, ?week=next / ?week=last (last week = the recap)
+                                 board (or any /group add group's key or name), ?week=next /
+                                 ?week=last (last week = the recap)
   GET /calendar.png              the same board as a picture (needs Chromium, like the Discord post)
   GET /calendar.ics              calendar feed (Google Calendar, Apple Calendar, phones: "add by URL"):
                                  this week's and next week's streams, past and scheduled, ?group=
@@ -24,14 +25,13 @@ from aiohttp import web
 from .calendar import Tile, Week
 from .calendar_post import CalendarPoster
 from .render import logo_data_url, page
-from .store import GROUPS
+from . import groups
 
 REFRESH_SEC = 300
 
 
 def _group(request: web.Request) -> str:
-    g = request.query.get("group", "flavr").lower()
-    return g if g in GROUPS else "flavr"
+    return groups.find(request.query.get("group", "")) or "flavr"
 
 
 def _offset(request: web.Request) -> int:

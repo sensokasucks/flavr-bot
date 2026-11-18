@@ -16,6 +16,10 @@ up to an hour to show the first time):
     /friend remove name    /friend main name platform   /friend import list
     /friend schedule name day time [title]   a regular weekly time by hand (Kick, no-schedule people)
     /friend unschedule name    /friend hide name hidden   (keep someone off the calendar)
+    /friend group name group   move someone to another group
+    /group add name [colour]   /group edit group [name] [colour]   /group remove group   /group list
+                        custom groups next to FlaVR and Friends (flavrbot/groups.py); group options
+                        everywhere are typed with suggestions (autocomplete)
     /setup live-channel group channel                   where go-live posts go for a group
     /setup calendar-channel group channel               where the weekly calendar + recap go
     /calendar post [group]  a fresh calendar post now
@@ -58,13 +62,13 @@ from .server_care import MAX_ROLE_BUTTONS, ServerCare, missing
 from .core_link import CoreLink
 from .pings import KINDS, Pinger, length
 from .share import X_STYLES
-from .store import GROUPS, PLATFORMS, Store
+from . import groups
+from .store import PLATFORMS, Store
 from .watcher import Watcher, main_platform
 
 log = logging.getLogger("flavrbot.bot")
 NO_PINGS = discord.AllowedMentions.none()
 # FlaVR brand colours (the logo's pink and teal); the friends group gets teal
-GROUP_COLOURS = {"flavr": 0xF72CA2, "friends": 0x2AE0D4}
 ENDED_COLOUR = 0x5B5F66
 PLATFORM_ICONS = {"youtube": "▶️ YouTube", "twitch": "🟣 Twitch", "kick": "🟢 Kick"}
 
@@ -86,7 +90,7 @@ def parse_time(text: str) -> Optional[int]:
 
 def make_embed(data: Dict[str, Any], picture: str = "") -> discord.Embed:
     """flavrbot/calendar_post.py ``embed()`` data → a discord.Embed (with the attached picture)."""
-    e = discord.Embed(title=data["title"][:256], colour=data.get("colour") or GROUP_COLOURS["flavr"])
+    e = discord.Embed(title=data["title"][:256], colour=data.get("colour") or groups.colour_int("flavr"))
     for name, value in data.get("fields") or []:
         e.add_field(name=name[:256], value=value[:1024], inline=False)
     if data.get("empty"):
@@ -122,7 +126,7 @@ def parse_import(text: str) -> List[Tuple[str, str, str, str]]:
         parts = [p.strip() for p in line.split(",")]
         if len(parts) < 3 or parts[1].lower() not in PLATFORMS:
             continue
-        group = parts[3].lower() if len(parts) > 3 and parts[3].lower() in GROUPS else "flavr"
+        group = (groups.find(parts[3]) if len(parts) > 3 else None) or "flavr"     # key or name; unknown → FlaVR
         out.append((parts[0], parts[1].lower(), parts[2], group))
     return out
 
@@ -251,7 +255,7 @@ class FlavrBot(discord.Client):
         info = live_on.get(main) or {}
         e = discord.Embed(title=f"{person['name']} is live", description=session.get("title") or info.get("title") or "",
                           url=info.get("url") or session.get("url") or None,
-                          colour=GROUP_COLOURS.get(person.get("grp"), GROUP_COLOURS["flavr"]))
+                          colour=groups.colour_int(person.get("grp") or "flavr"))
         links = " · ".join(f"[{PLATFORM_ICONS.get(p, p)}]({i.get('url')})" for p, i in live_on.items())
         e.add_field(name="Watch", value=links or "—", inline=False)
         if session.get("game"):
@@ -470,15 +474,32 @@ class FlavrBot(discord.Client):
 
         friend = app_commands.Group(name="friend", description="People the go-live watcher follows")
         plat_choices = [app_commands.Choice(name=p.title(), value=p) for p in PLATFORMS]
-        group_choices = [app_commands.Choice(name="FlaVR", value="flavr"), app_commands.Choice(name="Friends", value="friends")]
+        # groups come from flavrbot/groups.py (FlaVR, Friends + /group add ones), so the group option is
+        # typed with suggestions (autocomplete) instead of a fixed list
+        async def group_auto(inter: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+            cur = current.lower()
+            return [app_commands.Choice(name=g["name"], value=k) for k, g in groups.all_groups().items()
+                    if cur in k or cur in g["name"].lower()][:25]
+
+        async def pick_group(inter: discord.Interaction, text: Optional[str]) -> Optional[str]:
+            """The group key for what was typed (blank = FlaVR); answers "no such group" and returns None."""
+            g = groups.find(text)
+            if g is None:
+                await inter.response.send_message(f"There's no group called {text}. /group list shows them; "
+                                                  "/group add makes one.", ephemeral=True)
+            return g
 
         @friend.command(name="add", description="Follow a channel (adds the person if new)")
-        @app_commands.choices(platform=plat_choices, group=group_choices)
+        @app_commands.choices(platform=plat_choices)
+        @app_commands.autocomplete(group=group_auto)
         async def friend_add(inter: discord.Interaction, name: str, platform: app_commands.Choice[str], handle: str,
-                             group: Optional[app_commands.Choice[str]] = None, owner: bool = False):
+                             group: Optional[str] = None, owner: bool = False):
             if not await managers_only(inter):
                 return
-            pid = bot.store.add_person(name, group.value if group else "flavr", owner, str(inter.user))
+            g = await pick_group(inter, group)
+            if g is None:
+                return
+            pid = bot.store.add_person(name, g, owner, str(inter.user))
             if not bot.store.add_account(pid, platform.value, handle.strip()):
                 await inter.response.send_message(f"{platform.name} {handle} is already on the list.", ephemeral=True)
                 return
@@ -511,10 +532,10 @@ class FlavrBot(discord.Client):
                 await inter.response.send_message("Nobody yet. Add people with /friend add or /friend import.", ephemeral=True)
                 return
             lines = []
-            for g in GROUPS:
+            for g in groups.keys():
                 rows = [p for p in people if p["grp"] == g]
                 if rows:
-                    lines.append(f"**{'FlaVR' if g == 'flavr' else 'Friends'}** ({len(rows)})")
+                    lines.append(f"**{groups.name(g)}** ({len(rows)})")
                     for p in rows:
                         accs = ", ".join(f"{a['platform']}:{a['handle']}" + ("" if a["platform_id"] else " (not found yet)")
                                          for a in p["accounts"])
@@ -599,7 +620,105 @@ class FlavrBot(discord.Client):
             await inter.response.send_message(f"{p['name']} is tagged as @{h} in the X text." if h else
                                               f"{p['name']} is written by name in the X text.", ephemeral=True)
 
+        @friend.command(name="group", description="Move someone to another group (FlaVR, Friends or one of yours)")
+        @app_commands.autocomplete(group=group_auto)
+        async def friend_group(inter: discord.Interaction, name: str, group: str):
+            if not await managers_only(inter):
+                return
+            p = bot.store.person(name)
+            if not p:
+                await inter.response.send_message(f"No one called {name}.", ephemeral=True)
+                return
+            g = await pick_group(inter, group)
+            if g is None:
+                return
+            bot.store.set_group(p["id"], g)
+            if bot.calendar:
+                bot.calendar.poke()
+            await inter.response.send_message(f"{p['name']} is in {groups.name(g)} now.", ephemeral=True)
+
         tree.add_command(friend)
+
+        # /group: make your own groups next to FlaVR and Friends (flavrbot/groups.py keeps the list).
+        # Each group gets its own go-live channel, calendar post, recap and share text once its channels
+        # are picked with /setup live-channel and /setup calendar-channel.
+        group_cmd = app_commands.Group(name="group", description="Groups of people (owner or Manage Server)")
+
+        @group_cmd.command(name="add", description="Make a new group next to FlaVR and Friends")
+        @app_commands.describe(name="Shown on the calendar, e.g. Art Pals", colour="Like #ff8800 (default teal)")
+        async def group_add(inter: discord.Interaction, name: str, colour: Optional[str] = None):
+            if not await managers_only(inter):
+                return
+            col = groups.parse_colour(colour) if colour else "#2ae0d4"
+            if col is None:
+                await inter.response.send_message("That isn't a colour. Try #ff8800.", ephemeral=True)
+                return
+            key = groups.add(name, col)
+            if not key:
+                why = ("That name is taken." if groups.find(name, default="") or groups.slug(name) in groups.keys()
+                       else f"There are already {groups.MAX_GROUPS} groups." if groups.slug(name)
+                       else "The name needs a letter or number.")
+                await inter.response.send_message(why, ephemeral=True)
+                return
+            await inter.response.send_message(
+                f"Made **{groups.name(key)}**. Next: put people in it with /friend add or /friend group, then pick "
+                "its channels with /setup live-channel and /setup calendar-channel.", ephemeral=True)
+
+        @group_cmd.command(name="edit", description="Rename a group or change its colour (FlaVR and Friends too)")
+        @app_commands.autocomplete(group=group_auto)
+        @app_commands.describe(colour="Like #ff8800")
+        async def group_edit(inter: discord.Interaction, group: str, name: Optional[str] = None,
+                             colour: Optional[str] = None):
+            if not await managers_only(inter):
+                return
+            g = await pick_group(inter, group)
+            if g is None:
+                return
+            col = groups.parse_colour(colour) if colour else None
+            if colour and col is None:
+                await inter.response.send_message("That isn't a colour. Try #ff8800.", ephemeral=True)
+                return
+            other = groups.find(name, default="") if name else ""
+            if other and other != g:
+                await inter.response.send_message("Another group already has that name.", ephemeral=True)
+                return
+            groups.update(g, name, col)
+            if bot.calendar:
+                bot.calendar.poke()                 # redraw the board with the new name / colour
+            await inter.response.send_message(f"**{groups.name(g)}** is {groups.colour(g)}.", ephemeral=True)
+
+        @group_cmd.command(name="remove", description="Delete one of your groups (its people move to Friends)")
+        @app_commands.autocomplete(group=group_auto)
+        async def group_remove(inter: discord.Interaction, group: str):
+            if not await managers_only(inter):
+                return
+            g = await pick_group(inter, group)
+            if g is None:
+                return
+            shown = groups.name(g)
+            if not groups.remove(g):
+                await inter.response.send_message("FlaVR and Friends stay (you can rename them with /group edit).",
+                                                  ephemeral=True)
+                return
+            moved = bot.store.move_group(g, "friends")
+            for k in ("live_channel", "calendar_channel", "calendar_post"):
+                bot.store.delete(f"{k}.{g}")        # its channels and post are forgotten (the post stays up)
+            await inter.response.send_message(f"Removed {shown}; {moved} person/people moved to Friends.",
+                                              ephemeral=True)
+
+        @group_cmd.command(name="list", description="All groups, how many people, and their channels")
+        async def group_list(inter: discord.Interaction):
+            people = bot.store.people()
+            lines = []
+            for k, info in groups.all_groups().items():
+                n = sum(1 for p in people if p["grp"] == k)
+                live_ch, cal_ch = bot.store.get(f"live_channel.{k}"), bot.store.get(f"calendar_channel.{k}")
+                lines.append(f"**{info['name']}** ({info['colour']}{', built in' if info['builtin'] else ''}): "
+                             f"{n} people · go-live {f'<#{live_ch}>' if live_ch else 'not set'} · "
+                             f"calendar {f'<#{cal_ch}>' if cal_ch else 'not set'}")
+            await inter.response.send_message("\n".join(lines)[:1900], ephemeral=True, allowed_mentions=NO_PINGS)
+
+        tree.add_command(group_cmd)
 
         calendar = app_commands.Group(name="calendar", description="The weekly stream calendar")
         style_choices = [app_commands.Choice(name=label, value=k) for k, (label, _) in X_STYLES.items()]
@@ -607,26 +726,32 @@ class FlavrBot(discord.Client):
                         app_commands.Choice(name="Last week (recap)", value=-1)]
 
         @calendar.command(name="view", description="The calendar picture and list (only you see it)")
-        @app_commands.choices(group=group_choices, week=week_choices)
-        async def calendar_view(inter: discord.Interaction, group: Optional[app_commands.Choice[str]] = None,
+        @app_commands.choices(week=week_choices)
+        @app_commands.autocomplete(group=group_auto)
+        async def calendar_view(inter: discord.Interaction, group: Optional[str] = None,
                                 week: Optional[app_commands.Choice[int]] = None):
             if not bot.calendar:
                 await inter.response.send_message("The calendar isn't running.", ephemeral=True)
                 return
+            g = await pick_group(inter, group)          # answers "no such group" itself, so before the defer
+            if g is None:
+                return
             await inter.response.defer(ephemeral=True, thinking=True)
             from .calendar_post import embed as cal_embed
-            w, png = await bot.calendar.view_png(group.value if group else "flavr", week.value if week else 0)
+            w, png = await bot.calendar.view_png(g, week.value if week else 0)
             name = "calendar.png"
             files = [discord.File(io.BytesIO(png), filename=name)] if png else []
             await inter.followup.send(embed=make_embed(cal_embed(w), name if png else ""), files=files,
                                       ephemeral=True, allowed_mentions=NO_PINGS)
 
         @calendar.command(name="post", description="Post a fresh calendar now (owner or Manage Server)")
-        @app_commands.choices(group=group_choices)
-        async def calendar_post_now(inter: discord.Interaction, group: Optional[app_commands.Choice[str]] = None):
+        @app_commands.autocomplete(group=group_auto)
+        async def calendar_post_now(inter: discord.Interaction, group: Optional[str] = None):
             if not await managers_only(inter):
                 return
-            g = group.value if group else "flavr"
+            g = await pick_group(inter, group)
+            if g is None:
+                return
             if not bot.calendar or not bot.store.get(f"calendar_channel.{g}"):
                 await inter.response.send_message("Pick its channel first: /setup calendar-channel.", ephemeral=True)
                 return
@@ -650,9 +775,10 @@ class FlavrBot(discord.Client):
                                       "7 days (60 for partners); Kick has no list of past streams.", ephemeral=True)
 
         @calendar.command(name="share", description="DMs you copy-ready text for other Discords and X")
-        @app_commands.choices(group=group_choices, week=week_choices, style=style_choices)
+        @app_commands.choices(week=week_choices, style=style_choices)
+        @app_commands.autocomplete(group=group_auto)
         @app_commands.describe(style="X layout this time (default: /setup share-style)")
-        async def calendar_share(inter: discord.Interaction, group: Optional[app_commands.Choice[str]] = None,
+        async def calendar_share(inter: discord.Interaction, group: Optional[str] = None,
                                  week: Optional[app_commands.Choice[int]] = None,
                                  style: Optional[app_commands.Choice[str]] = None):
             if not await owner_only(inter):
@@ -660,8 +786,11 @@ class FlavrBot(discord.Client):
             if not bot.calendar:
                 await inter.response.send_message("The calendar isn't running.", ephemeral=True)
                 return
+            g = await pick_group(inter, group)
+            if g is None:
+                return
             await inter.response.defer(ephemeral=True, thinking=True)
-            ok = await bot.calendar.share(group.value if group else "flavr", week.value if week else 0,
+            ok = await bot.calendar.share(g, week.value if week else 0,
                                           style.value if style else "")
             await inter.followup.send("Sent to your DMs." if ok else "Couldn't DM you. Discord → this server → Privacy "
                                       "Settings → allow direct messages.", ephemeral=True)
@@ -671,23 +800,29 @@ class FlavrBot(discord.Client):
         setup = app_commands.Group(name="setup", description="Bot settings (owner or Manage Server)")
 
         @setup.command(name="live-channel", description="Where go-live posts for a group go")
-        @app_commands.choices(group=group_choices)
-        async def setup_live(inter: discord.Interaction, group: app_commands.Choice[str], channel: discord.TextChannel):
+        @app_commands.autocomplete(group=group_auto)
+        async def setup_live(inter: discord.Interaction, group: str, channel: discord.TextChannel):
             if not await managers_only(inter):
                 return
-            bot.store.put(f"live_channel.{group.value}", str(channel.id))
-            await inter.response.send_message(f"{group.name} go-live posts go to {channel.mention}.", ephemeral=True)
+            g = await pick_group(inter, group)
+            if g is None:
+                return
+            bot.store.put(f"live_channel.{g}", str(channel.id))
+            await inter.response.send_message(f"{groups.name(g)} go-live posts go to {channel.mention}.", ephemeral=True)
 
         @setup.command(name="calendar-channel", description="Where the weekly calendar and recap go")
-        @app_commands.choices(group=group_choices)
-        async def setup_calendar(inter: discord.Interaction, group: app_commands.Choice[str], channel: discord.TextChannel):
+        @app_commands.autocomplete(group=group_auto)
+        async def setup_calendar(inter: discord.Interaction, group: str, channel: discord.TextChannel):
             if not await managers_only(inter):
                 return
-            bot.store.put(f"calendar_channel.{group.value}", str(channel.id))
-            bot.store.put(f"calendar_post.{group.value}", {})       # a fresh post in the new channel
+            g = await pick_group(inter, group)
+            if g is None:
+                return
+            bot.store.put(f"calendar_channel.{g}", str(channel.id))
+            bot.store.put(f"calendar_post.{g}", {})       # a fresh post in the new channel
             if bot.calendar:
                 bot.calendar.poke()
-            await inter.response.send_message(f"The {group.name} calendar goes to {channel.mention}; the first post "
+            await inter.response.send_message(f"The {groups.name(g)} calendar goes to {channel.mention}; the first post "
                                               "comes within a minute.", ephemeral=True)
 
         @setup.command(name="share-style", description="Default layout of the copy-ready X text")

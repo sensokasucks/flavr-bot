@@ -18,7 +18,7 @@ from pathlib import Path
 import aiohttp
 import discord
 
-from . import config
+from . import config, groups
 from .bot import FlavrBot
 from .calendar_post import CalendarPoster
 from .core_link import CoreLink
@@ -44,6 +44,7 @@ async def main() -> int:
     if not s.discord_token or not s.owner_id:
         return 2                # nothing works without these; the log says what to set
     store = Store(Path(s.data_dir) / "flavr_bot.db")
+    groups.init(store)                      # custom groups (/group add) live in this database
     folded = store.merge_overlaps()         # streams counted twice by an older version (or a long outage)
     if folded:
         log.info("Merged %d stream(s) that had been counted twice", folded)

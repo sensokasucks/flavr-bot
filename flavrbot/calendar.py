@@ -33,6 +33,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
+from . import groups
 from .store import PLATFORMS, Store
 
 MATCH_WINDOW = 3 * 3600.0       # a stream this close to a scheduled time "is" that scheduled stream
@@ -40,7 +41,6 @@ MERGE_WINDOW = 30 * 60.0        # scheduled on two platforms this close = one mu
 STALE_AFTER = 3600.0            # a scheduled time this far gone with no stream drops off
 LATE_NOTICE = 3600.0            # scheduled less than this ahead (or not at all) = LATE NOTICE
 DAY_NAMES = ("SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT")
-GROUP_TITLES = {"flavr": ("THIS WEEK", "WEEK IN REVIEW"), "friends": ("THIS WEEK WITH FRIENDS", "FRIENDS: WEEK IN REVIEW")}
 
 
 @dataclass
@@ -89,8 +89,7 @@ class Week:
 
     @property
     def title(self) -> str:
-        t = GROUP_TITLES.get(self.group, GROUP_TITLES["friends"])
-        return t[1] if self.recap else t[0]
+        return groups.title(self.group, self.recap)        # flavrbot/groups.py (custom groups too)
 
     @property
     def range_text(self) -> str:

@@ -36,6 +36,7 @@ from typing import Callable, Optional
 
 import aiohttp
 
+from . import groups
 from .calendar import DAY_NAMES, Tile, Week
 
 log = logging.getLogger("flavrbot.render")
@@ -190,12 +191,23 @@ h1{display:flex;align-items:center;gap:18px;font-size:44px;letter-spacing:2px;fo
 footer{margin-top:12px;display:flex;justify-content:space-between;gap:30px;color:#99a;font-size:15px;white-space:nowrap}
 footer span:first-child{overflow:hidden;text-overflow:ellipsis}
 """
+# FlaVR's board keeps the logo's four colours; every other group is built by theme() from its one colour
 THEMES = {
     "flavr": "--c1:#f72ca2;--c2:#b7ef33;--c3:#f8cf33;--c4:#2ae0d4;--today:#2ae0d4;--today-bg:#2ae0d414;"
              "--today-glow:#2ae0d433;--tag:#f8cf33;--glow1:#f72ca255;--glow2:#2ae0d444",
-    "friends": "--c1:#2ae0d4;--c2:#2ae0d4;--c3:#2ae0d4;--c4:#2ae0d4;--today:#2ae0d4;--today-bg:#2ae0d414;"
-               "--today-glow:#2ae0d433;--tag:#2ae0d4;--glow1:#2ae0d433;--glow2:#2ae0d422",
 }
+
+
+
+def theme(group: str) -> str:
+    """The board's colours: FlaVR's four logo colours; every other group (Friends, /group add ones) one
+    colour throughout, its /group colour (flavrbot/groups.py; Friends = teal)."""
+    if group == "flavr":
+        return THEMES["flavr"]
+    c = groups.colour(group)
+    return (f"--c1:{c};--c2:{c};--c3:{c};--c4:{c};--today:{c};--today-bg:{c}14;--today-glow:{c}33;"
+            f"--tag:{c};--glow1:{c}33;--glow2:{c}22")
+
 
 Img = Callable[[str], str]      # picture URL → what goes in src / url() ("" = no picture)
 
@@ -294,7 +306,7 @@ def page(week: Week, img: Img, logo: str = "", footer_note: str = "", refresh: i
                            f"Updated {DAY_NAMES[(updated.weekday() + 1) % 7].title()} {clock(week.now, week.tz)}")
     meta = f'<meta http-equiv="refresh" content="{refresh}">' if refresh else ""
     return (f'<!doctype html><html><head><meta charset="utf-8">{meta}<title>{html.escape(week.title.title())}</title>'
-            f'<style>:root{{{THEMES.get(week.group, THEMES["friends"])}}}{CSS}</style></head><body>'
+            f'<style>:root{{{theme(week.group)}}}{CSS}</style></head><body>'
             f'<header><h1>{head}</h1><div class="range">{html.escape(week.range_text)} · {html.escape(tz_words(week.tz))}</div>'
             f'<div class="stats">{stats}</div></header><div class="grid">{cols}</div>'
             f'<footer><span>{html.escape(quiet)}</span><span>{html.escape(foot)}</span></footer></body></html>')

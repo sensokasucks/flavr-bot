@@ -71,7 +71,14 @@ async def main() -> int:
             if not gateway[key]:
                 log.warning("%s Intent is off in the developer portal: server care runs with less (see /setup check)", label)
         bot = FlavrBot(s, store, link, pinger, watcher, gateway=gateway)
-        link.on_stream = pinger.on_stream
+        async def on_core_stream(change):
+            # Stream Core's own start / end: the phone ping, then live mode (flavrbot/community.py)
+            await pinger.on_stream(change)
+            ev = change.get("event")
+            if ev in ("started", "resumed", "ended"):
+                await bot.community.live_mode(ev != "ended", str(change.get("game") or ""))
+
+        link.on_stream = on_core_stream
         link.on_alert = pinger.on_alert
         link.on_core_lost = pinger.core_lost
         link.on_core_back = pinger.core_back
@@ -88,14 +95,23 @@ async def main() -> int:
         async def on_start(person, session, live_on):
             out = await bot.post_start(person, session, live_on)
             poster.poke()
+            if person.get("is_owner"):          # the watcher saw the owner go live (Core may be off): live mode
+                await bot.community.live_mode(True, session.get("game") or "")
             return out
 
         async def on_end(person, session):
             await bot.post_end(person, session)
             poster.poke()
+            if person.get("is_owner"):
+                await bot.community.live_mode(False)
 
         watcher.on_start = on_start
-        watcher.on_change = bot.post_change
+        async def on_change(person, session, live_on):
+            await bot.post_change(person, session, live_on)
+            if person.get("is_owner") and session.get("game"):     # new game: the voice channel name follows
+                await bot.community.live_mode(True, session["game"])
+
+        watcher.on_change = on_change
         watcher.on_end = on_end
         watcher.on_scheduled = poster.on_scheduled
 
@@ -119,7 +135,8 @@ async def main() -> int:
                  asyncio.create_task(after_ready(fill_in), name="backfill"),
                  asyncio.create_task(after_ready(poster.run), name="calendar"),
                  asyncio.create_task(after_ready(watcher.run_schedules), name="schedules"),
-                 asyncio.create_task(after_ready(bot.care.run_backups), name="backups")]
+                 asyncio.create_task(after_ready(bot.care.run_backups), name="backups"),
+                 asyncio.create_task(after_ready(bot.community.run_daily), name="moments")]
         for platform, checker in checkers.items():
             if checker.ready:
                 tasks.append(asyncio.create_task(watch(platform), name=f"watch-{platform}"))

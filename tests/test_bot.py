@@ -14,8 +14,9 @@ async def test_commands_register():
     groups.init(store)
     bot = FlavrBot(s, store, CoreLink(store, "k"), Pinger(store, None), Watcher(store, {}, {}))
     names = sorted(c.name for c in bot.tree.get_commands())
-    assert names == ["backup", "calendar", "friend", "group", "live", "mod", "pings", "points", "queue", "roles", "schedule",
-                     "setup", "status", "wake"]
+    assert names == ["backup", "birthday", "calendar", "friend", "group", "growth", "live", "live-mode", "lockdown",
+                     "mod", "modmail", "pings", "points", "queue", "roles", "schedule", "setup", "status", "wake",
+                     "warn", "warnings", "welcome"]
     friend = next(c for c in bot.tree.get_commands() if c.name == "friend")
     assert sorted(c.name for c in friend.commands) == ["add", "group", "hide", "import", "list", "main",
                                                        "remove", "schedule", "unschedule", "x"]
@@ -23,7 +24,7 @@ async def test_commands_register():
     assert sorted(c.name for c in group.commands) == ["add", "edit", "list", "remove"]
     setup = next(c for c in bot.tree.get_commands() if c.name == "setup")
     assert sorted(c.name for c in setup.commands) == ["calendar-channel", "check", "live-channel", "mod-log",
-                                                      "share-style"]
+                                                      "modmail", "moments", "share-style", "starboard"]
     # without the developer-portal switches the bot asks for neither privileged intent (it would be refused)
     assert not bot.intents.members and not bot.intents.message_content
     # every command's description fits Discord's 100-character limit

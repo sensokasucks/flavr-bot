@@ -2,6 +2,8 @@
 Server care, starter pack: role buttons, the mod log, scam link blocking and a daily backup of
 the server's layout. Plan doc: "Discord bot: next features plan" (server care menu, approved by
 the owner 2026-11-17; these four were the suggested first ones).
+The rest of the menu (welcome, raid lockdown, warnings, modmail, live mode, starboard, member
+moments, growth) is flavrbot/community.py, which writes into this file's mod log (``post``).
 
   Role buttons   /roles add | remove | list | post: one panel of buttons; a click gives or takes
                  that role. Buttons carry the custom id ``flavr-role:<role id>`` and are answered

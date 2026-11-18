@@ -81,6 +81,13 @@ class Settings:
     scam_timeout_min: int = 60          # timeout for someone who posts a scam link (minutes; 0 = none)
     backup_hour: int = 4                # daily server layout backup at this hour (TZ, 0-23)
     backup_keep: int = 30               # backups kept (one per day)
+    # Server care round 2 (flavrbot/community.py)
+    raid_joins: int = 8                 # this many joins ...
+    raid_window_sec: int = 60           # ... within this many seconds = a raid → lockdown
+    warn_limit: int = 3                 # every this-many active warnings = a timeout (0 = never)
+    warn_days: int = 30                 # warnings older than this stop counting
+    warn_timeout_min: int = 1440        # that timeout, minutes (Discord's cap: 28 days)
+    moments_hour: int = 10              # anniversaries / birthdays / Sunday growth DM at this hour (TZ)
     # Storage
     data_dir: str = "/data"
     extra: Dict[str, str] = field(default_factory=dict)
@@ -125,6 +132,12 @@ def load(env: Optional[Mapping[str, str]] = None) -> Settings:
         scam_timeout_min=max(0, min(40320, _int(env, "SCAM_TIMEOUT_MIN", 60))),     # Discord's cap: 28 days
         backup_hour=_int(env, "BACKUP_HOUR", 4) % 24,
         backup_keep=max(1, _int(env, "BACKUP_KEEP", 30)),
+        raid_joins=max(2, _int(env, "RAID_JOINS", 8)),
+        raid_window_sec=max(5, _int(env, "RAID_WINDOW_SEC", 60)),
+        warn_limit=max(0, _int(env, "WARN_LIMIT", 3)),
+        warn_days=max(1, _int(env, "WARN_DAYS", 30)),
+        warn_timeout_min=max(0, min(40320, _int(env, "WARN_TIMEOUT_MIN", 1440))),
+        moments_hour=_int(env, "MOMENTS_HOUR", 10) % 24,
         data_dir=g("DATA_DIR", "/data"),
     )
 

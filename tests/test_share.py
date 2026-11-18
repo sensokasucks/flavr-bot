@@ -160,16 +160,21 @@ def test_article_style_links_the_copy_page():
     assert "<http://192.168.0.20:3870/calendar/article?group=flavr>" in msgs[-1] and "This week in FlaVR" in msgs[-1]
 
 
-def test_article_pictures_sit_above_their_vod_links():
+def test_article_has_one_picture_per_day_above_its_links():
     from flavrbot.share import article
-    w = week(1, recap=True)
-    w.days[0][0].thumb = "https://i.ytimg.com/vi/v00/hqdefault.jpg"
-    w.days[1][0].avatar = "https://yt3.example/lulu.jpg"
-    a = article(w, save=lambda u: "/calendar/img/x.jpg")
-    assert [p[:2] for p in a["pictures"]] == [(1, "01-sun-streamer00.jpg"), (2, "02-mon-streamer10.jpg")]
+    from flavrbot.render import day_card, day_columns
+    w = week(3, recap=True)
+    w.days[2] = []                                          # a day without streams gets no picture
+    a = article(w, save=lambda day: f"/calendar/day.png?day={day}")
+    assert [p for p in a["pictures"]] == [(1, "01-sun.png", 0), (2, "02-mon.png", 1), (3, "03-wed.png", 3),
+                                          (4, "04-thu.png", 4), (5, "05-fri.png", 5), (6, "06-sat.png", 6)]
     h = a["html"]
-    assert h.index('<img src="https://i.ytimg.com/vi/v00/hqdefault.jpg"') < h.index("Picture 1") < h.index("youtu.be/v00")
-    assert 'class="nocopy"' in h and "Picture" not in article(w)["html"]       # no save line without the cache
+    assert h.count("<img") == 6 and h.count('class="nocopy"') == 6
+    assert h.index("<h2>Sunday") < h.index("day.png?day=0") < h.index("youtu.be/v00") < h.index("<h2>Monday")
+    assert "<img" not in article(w)["html"]                 # no save address: no picture block
+    assert [day_columns(n) for n in (1, 2, 4, 5, 9, 10, 16, 17)] == [1, 2, 2, 3, 3, 4, 4, 5]
+    doc = day_card(w, 0, lambda u: "")
+    assert "SUNDAY · NOV 15" in doc and doc.count('class="c"') == 3
 
 
 def test_article_cover_is_5_by_2_with_top_streamers_first():
@@ -178,6 +183,15 @@ def test_article_cover_is_5_by_2_with_top_streamers_first():
     w = week(2, recap=True)
     w.days[3][1].end += 5 * 3600                            # Streamer31 streamed the longest
     people = cover_people(w)
-    assert len(people) == 8 and people[0].name == "Streamer31"
+    assert len(people) == 8 and people[0]["tile"].name == "Streamer31"
+    assert people[0]["hours"] > people[1]["hours"]
     doc = cover(w, lambda u: "", "")
+    assert doc.count("<em>") == 8 and " stream" in doc
     assert "WEEK IN REVIEW" in doc and "Nov 15 – 21" in doc and doc.count('class="p"') == 8
+
+
+def test_cover_stats_line():
+    from flavrbot.render import cover_stats
+    assert cover_stats({"hours": 24.4, "streams": 6}, True) == "24h · 6 streams"
+    assert cover_stats({"hours": 2.5, "streams": 1}, True) == "2.5h · 1 stream"
+    assert cover_stats({"hours": 0, "streams": 3}, False) == "3 planned"

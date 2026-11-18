@@ -170,3 +170,14 @@ def test_article_pictures_sit_above_their_vod_links():
     h = a["html"]
     assert h.index('<img src="https://i.ytimg.com/vi/v00/hqdefault.jpg"') < h.index("Picture 1") < h.index("youtu.be/v00")
     assert 'class="nocopy"' in h and "Picture" not in article(w)["html"]       # no save line without the cache
+
+
+def test_article_cover_is_5_by_2_with_top_streamers_first():
+    from flavrbot.render import COVER_H, COVER_W, cover, cover_people
+    assert COVER_W * 2 == COVER_H * 5
+    w = week(2, recap=True)
+    w.days[3][1].end += 5 * 3600                            # Streamer31 streamed the longest
+    people = cover_people(w)
+    assert len(people) == 8 and people[0].name == "Streamer31"
+    doc = cover(w, lambda u: "", "")
+    assert "WEEK IN REVIEW" in doc and "Nov 15 – 21" in doc and doc.count('class="p"') == 8

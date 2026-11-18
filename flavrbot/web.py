@@ -16,6 +16,7 @@ what is public anyway (stream titles and times). Never forward the port on the r
                                  X's Article editor as headings, bold and links) and the picture for
                                  the cover; ?group= ?week= as above. The share DM links here.
                                  Each stream has its picture with its VOD link under it.
+  GET /calendar/cover.png        the X Article cover: 1500 x 600 (5:2, what X asks for), the board's look
   GET /calendar/article.zip      those pictures, numbered in the article's order (01-sun-name.jpg ...),
                                  for when X's editor drops pictures from pasted text
 
@@ -102,6 +103,15 @@ def add_routes(app: web.Application, poster: CalendarPoster) -> None:
             return web.Response(status=503, text="The picture needs Chromium (see the README).")
         return web.Response(body=png, content_type="image/png", headers={"Cache-Control": "max-age=60"})
 
+    async def cover_picture(request: web.Request) -> web.Response:
+        off = _offset(request)
+        if off < 0:
+            await poster.ensure_backfill(poster.week_of(off))
+        png = await poster.cover_png(poster.build(_group(request), poster.week_of(off), recap=off < 0))
+        if not png:
+            return web.Response(status=503, text="The picture needs Chromium (see the README).")
+        return web.Response(body=png, content_type="image/png", headers={"Cache-Control": "max-age=60"})
+
     async def feed(request: web.Request) -> web.Response:
         g = _group(request)
         weeks = [poster.build(g, poster.week_of(0)), poster.build(g, poster.week_of(1))]
@@ -125,7 +135,8 @@ def add_routes(app: web.Application, poster: CalendarPoster) -> None:
         a = await _article(request)
         q = "?" + "&".join(f"{k}={v}" for k, v in request.query.items() if k in ("group", "week"))
         q = q if len(q) > 1 else ""
-        return web.Response(text=article_html(a, "/calendar.png" + q, "/calendar/article.zip" + q),
+        return web.Response(text=article_html(a, "/calendar.png" + q, "/calendar/article.zip" + q,
+                                              "/calendar/cover.png" + q),
                             content_type="text/html", charset="utf-8")
 
     async def article_zip(request: web.Request) -> web.Response:
@@ -151,12 +162,13 @@ def add_routes(app: web.Application, poster: CalendarPoster) -> None:
     app.router.add_get("/calendar", board)
     app.router.add_get("/calendar.png", picture)
     app.router.add_get("/calendar.ics", feed)
+    app.router.add_get("/calendar/cover.png", cover_picture)
     app.router.add_get("/calendar/img/{name}", image)
     app.router.add_get("/calendar/article", article_page)
     app.router.add_get("/calendar/article.zip", article_zip)
 
 
-def article_html(a: dict, png_url: str, zip_url: str = "") -> str:
+def article_html(a: dict, png_url: str, zip_url: str = "", cover_url: str = "") -> str:
     """The copy page around share.article's text. Copying uses a selection + execCommand("copy"):
     the newer clipboard API only works on https or localhost, and this page is plain http on the home
     network. Copying a selection keeps it as rich text, which is what X's Article editor wants. The
@@ -176,18 +188,19 @@ button.alt,a.btn.alt{{background:#2a2d3a}}
 .box .nocopy{{font-size:13px;color:#667}} .box p.s{{margin-top:22px}} .box h2+p.s{{margin-top:4px}} .box h2+p{{margin-top:4px}}
 .tip{{color:#aab;font-size:14px}} #done{{color:#b7ef33;font-weight:600}} img{{max-width:100%;border-radius:10px}}
 </style></head><body><main>
-<p class="tip">On X: Write → <b>Article</b>. Copy the title into the title box, then copy the article into the body.
-Save the picture and use it as the cover (X crops covers to 5:2).</p>
+<p class="tip">On X: Write → <b>Article</b>. Put the cover picture in the box at the top, copy the title into the
+title box, then copy the article into the body.</p>
 <div id="title">{t}</div>
 <div class="bar"><button class="alt" onclick="copy('title')">Copy title</button>
 <button onclick="copy('body')">Copy article</button>
-<a class="btn alt" href="{html.escape(png_url, quote=True)}" download="calendar.png">Save the cover</a>
+{f'<a class="btn alt" href="{html.escape(cover_url, quote=True)}" download="cover.png">Save the cover (5:2)</a>' if cover_url else ""}
+<a class="btn alt" href="{html.escape(png_url, quote=True)}" download="calendar.png">Save the full calendar</a>
 {f'<a class="btn alt" href="{html.escape(zip_url, quote=True)}">All {len(a.get("pictures") or [])} stream pictures (.zip)</a>' if zip_url and a.get("pictures") else ""}
 <span id="done"></span></div>
 <p class="tip">If X leaves the stream pictures out when you paste, add each one with X's picture button where its
 "Picture N" was; the zip has them numbered in order.</p>
 <div class="box" id="body">{a["html"]}</div>
-<p class="tip">Cover picture:</p><img src="{html.escape(png_url, quote=True)}" alt="">
+<p class="tip">Cover picture (5:2):</p><img src="{html.escape(cover_url or png_url, quote=True)}" alt="">
 </main><script>
 function copy(id){{const src=document.getElementById(id),el=src.cloneNode(true);
 el.querySelectorAll('.nocopy').forEach(n=>n.remove());el.style.cssText='position:fixed;left:-9999px;top:0';

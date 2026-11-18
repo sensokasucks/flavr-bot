@@ -346,6 +346,61 @@ def page(week: Week, img: Img, logo: str = "", footer_note: str = "", refresh: i
             f'<footer><span>{html.escape(quiet)}</span><span>{html.escape(foot)}</span></footer></body></html>')
 
 
+# ── the X Article cover (5:2) ──────────────────────────────────────────
+COVER_W, COVER_H = 1500, 600        # X Articles want a 5:2 cover; keep text away from the edges (phones trim)
+COVER_PICS = 8                      # thumbnails on the cover (4 x 2)
+
+
+def cover_people(week: Week) -> list:
+    """Who goes on the cover: one tile per person, most hours first for the recap, else the order
+    they stream in; at most COVER_PICS."""
+    by: dict = {}
+    for t in week.tiles():
+        r = by.setdefault(t.person_id, {"tile": t, "hours": 0.0, "first": t.at})
+        r["hours"] += t.length / 3600 if t.kind == "past" else 0
+        if (t.thumb and not r["tile"].thumb) or (week.recap and t.length > r["tile"].length):
+            r["tile"] = t
+    rows = sorted(by.values(), key=lambda r: (-r["hours"], r["first"]) if week.recap else (r["first"],))
+    return [r["tile"] for r in rows[:COVER_PICS]]
+
+
+def cover(week: Week, img: Img, logo: str = "") -> str:
+    """The X Article cover, 1500 x 600, the board's look: logo (FlaVR) or group name, the board title,
+    the dates and numbers on the left; the people's stream pictures (thumbnail, else profile picture)
+    with their names on the right. flavrbot/web.py /calendar/cover.png screenshots it."""
+    e = html.escape
+    if week.recap:
+        stats = f"{week.stream_count} streams · {week.hours_live:.0f} hours live"
+    else:
+        stats = f"{sum(len(d) for d in week.days)} streams this week"
+    title = groups.title(week.group, week.recap)
+    name = "" if (logo and week.group == "flavr") else e(groups.name(week.group).upper())
+    head = f'<img class="logo" src="{e(logo, quote=True)}">' if logo and week.group == "flavr" else f"<b>{name}</b>"
+    if week.group != "flavr":
+        title = "WEEK IN REVIEW" if week.recap else "THIS WEEK"
+    pics = ""
+    for i, t in enumerate(cover_people(week)):
+        src = img(t.thumb) or img(t.avatar)
+        style = f' style="background-image:url(&quot;{e(src, quote=True)}&quot;)"' if src else ""
+        pics += f'<div class="p"><i class="c{i % 4}"{style}></i><span>{e(t.name)}</span></div>'
+    css = (":root{" + theme(week.group) + "}*{box-sizing:border-box;margin:0}"
+           f"html,body{{background:#0e0f14}}body{{width:{COVER_W}px;height:{COVER_H}px;overflow:hidden;"
+           'font-family:"DejaVu Sans","Noto Sans","Noto Sans CJK JP",Arial,sans-serif;color:#eef;display:flex;'
+           "align-items:center;gap:44px;padding:0 70px;background-image:radial-gradient(circle at 85% -10%,var(--glow1) 0,"
+           "transparent 45%),radial-gradient(circle at 0% 110%,var(--glow2) 0,transparent 45%)}"
+           ".l{flex:0 0 470px}.logo{height:120px;filter:drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff)}"
+           ".l>b{font-size:54px;letter-spacing:2px;color:var(--c1)}"
+           "h1{font-size:50px;font-weight:800;letter-spacing:2px;margin-top:18px;line-height:1.05}"
+           ".d{font-size:30px;color:#ccd;margin-top:14px}.s{font-size:24px;color:var(--c4);margin-top:10px;font-weight:700}"
+           ".g{flex:1;display:grid;grid-template-columns:repeat(4,1fr);gap:16px 14px}"
+           ".p i{display:block;aspect-ratio:16/9;border-radius:12px;background:#1b1d26 center/cover no-repeat;"
+           "border:3px solid var(--c1)}.p i.c1{border-color:var(--c2)}.p i.c2{border-color:var(--c3)}.p i.c3{border-color:var(--c4)}"
+           ".p span{display:block;font-size:17px;font-weight:700;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}")
+    return (f'<!doctype html><html><head><meta charset="utf-8"><style>{css}</style></head><body>'
+            f'<div class="l">{head}<h1>{e(title)}</h1><div class="d">{e(week.range_text)}</div>'
+            f'<div class="s">{e(stats)}</div></div><div class="g">{pics}</div></body></html>')
+
+
 # ── the picture ────────────────────────────────────────────────────────
 class Screenshotter:
     """One headless Chromium, started on first use and kept (a render is then ~0.3 s)."""
@@ -362,11 +417,12 @@ class Screenshotter:
         kw = {"executable_path": self.chromium_path} if self.chromium_path else {}
         self._browser = await self._pw.chromium.launch(args=["--no-sandbox"], **kw)
 
-    async def png(self, doc: str) -> bytes:
+    async def png(self, doc: str, size: tuple = (WIDTH, HEIGHT)) -> bytes:
+        """``doc`` as a PNG of ``size`` (the board 1600 x 900; the X Article cover COVER_W x COVER_H)."""
         async with self._lock:
             if self._browser is None or not self._browser.is_connected():
                 await self._start()
-            page = await self._browser.new_page(viewport={"width": WIDTH, "height": HEIGHT})
+            page = await self._browser.new_page(viewport={"width": size[0], "height": size[1]})
             try:
                 await page.set_content(doc, wait_until="load", timeout=30_000)
                 return await page.screenshot(type="png", full_page=False)

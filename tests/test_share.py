@@ -35,13 +35,17 @@ def test_discord_text_uses_time_stamps_and_quiet_links():
 def test_x_reply_style_keeps_links_out_of_the_main_post():
     posts = x_posts(week(2), {0: "@lulu"}, "reply")
     assert len(posts) == 2
-    assert "https://" not in posts[0] and "Sun 7p @lulu · 8p Streamer01" in posts[0] and "(Nov 15 – 21, EST)" in posts[0]
-    assert posts[1].startswith("Links 👇") and "@lulu (Sun 7p): https://youtu.be/v00" in posts[1]
+    assert "https://" not in posts[0] and "Nov 15 – 21 · times in EST" in posts[0]
+    assert "SUN · NOV 15\n▸ 7 PM · @lulu\n▸ 8 PM · Streamer01\n\nMON · NOV 16" in posts[0]
+    assert posts[1].startswith("🔗 Links") and "@lulu · Sun 7 PM\nhttps://youtu.be/v00" in posts[1]
 
 
 def test_x_one_post_has_everything():
     posts = x_posts(week(3), {}, "one")
-    assert len(posts) == 1 and posts[0].count("https://") == 21 and "7p Streamer00 · Game night https://" in posts[0]
+    assert len(posts) == 1 and posts[0].count("https://") == 21
+    assert "▸ 7 PM · Streamer00 · Game night\n   https://youtu.be/v00" in posts[0]
+    recap = x_posts(week(1, recap=True), {}, "reply")[0]
+    assert recap.startswith("📼 FlaVR week in review") and "▸ 7 PM · Streamer00 · 2 h" in recap
 
 
 def test_x_thread_fits_280():
@@ -68,7 +72,7 @@ async def test_share_package_and_default_style():
     w = week()
     w.days[0][0].person_id = pid
     msgs = poster.share_messages(w)
-    assert msgs[0].startswith("📋") and msgs[1].startswith("🗓️ **") and "@luluteala" in msgs[2] and msgs[3].startswith("Links")
+    assert msgs[0].startswith("📋") and msgs[1].startswith("🗓️ **") and "@luluteala" in msgs[2] and msgs[3].startswith("🔗 Links")
     store.put("share_x_style", "one")
     assert len(poster.share_messages(w)) == 3
     assert len(poster.share_messages(w, "thread")) >= 3               # an override beats the default
@@ -80,3 +84,11 @@ async def test_share_package_and_default_style():
     poster.quiet = lambda: False
     await poster.flush_shares()
     assert len(d.sent) == 1 and d.sent[0][1] == b"png"
+
+
+def test_x_bold_days_and_hashtags():
+    posts = x_posts(week(1), {}, "reply", bold=True, tags="#FlaVR #vtuber")
+    assert "𝗦𝗨𝗡 · 𝗡𝗢𝗩 𝟭𝟱\n▸ 7 PM · Streamer00" in posts[0]
+    assert posts[0].endswith("\n\n#FlaVR #vtuber") and "#FlaVR" not in posts[1]
+    thread = x_posts(week(4), {}, "thread", tags="#FlaVR")
+    assert all(x_len(p) <= X_MAX for p in thread)

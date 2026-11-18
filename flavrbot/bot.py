@@ -21,7 +21,8 @@ up to an hour to show the first time):
     /calendar post [group]  a fresh calendar post now
     /calendar refresh [week]  fill a week in again from the channels' past streams (VODs)
     /calendar share [group] [week] [style]   DMs you copy-ready text for other Discords and X (flavrbot/share.py)
-    /setup share-style style   the X text's default layout (post + links reply / one post / 280 thread)
+    /setup share-style style [bold_days] [hashtags]   the X text's default layout (post + links reply /
+                        one post / 280 thread), bold-looking day headings, a hashtag line
     /friend x name handle   their X handle, so the X text tags them ("-" removes it)
   Server care (flavrbot/server_care.py; owner or Manage Server)
     /setup mod-log channel    where the mod log goes      /setup check   what the bot still needs
@@ -691,11 +692,26 @@ class FlavrBot(discord.Client):
 
         @setup.command(name="share-style", description="Default layout of the copy-ready X text")
         @app_commands.choices(style=[app_commands.Choice(name=label, value=k) for k, (label, _) in X_STYLES.items()])
-        async def setup_share_style(inter: discord.Interaction, style: app_commands.Choice[str]):
+        @app_commands.describe(bold_days="Day headings in bold-looking letters (screen readers skip them)",
+                               hashtags="A line at the end, like #FlaVR #vtuber (- removes it)")
+        async def setup_share_style(inter: discord.Interaction, style: app_commands.Choice[str],
+                                    bold_days: Optional[bool] = None, hashtags: Optional[str] = None):
             if not await owner_only(inter):
                 return
             bot.store.put("share_x_style", style.value)
-            await inter.response.send_message(f"X text: {X_STYLES[style.value][1]}.", ephemeral=True)
+            if bold_days is not None:
+                bot.store.put("share_x_bold", bold_days)
+            if hashtags is not None:
+                tags = " ".join(t if t.startswith("#") else "#" + t for t in hashtags.replace(",", " ").split()
+                                if t not in ("-", "none"))
+                bot.store.put("share_x_tags", tags[:200])
+            extra = []
+            if bot.store.get("share_x_bold"):
+                extra.append("bold day headings")
+            if bot.store.get("share_x_tags"):
+                extra.append(f"ending with {bot.store.get('share_x_tags')}")
+            await inter.response.send_message(f"X text: {X_STYLES[style.value][1]}" + (f"; {', '.join(extra)}" if extra
+                                              else "") + ".", ephemeral=True)
 
         @setup.command(name="mod-log", description="Where the mod log goes (deletes, edits, joins, bans, scams)")
         async def setup_mod_log(inter: discord.Interaction, channel: discord.TextChannel):

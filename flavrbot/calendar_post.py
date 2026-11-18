@@ -228,7 +228,8 @@ class CalendarPoster:
         style (flavrbot/share.py X_STYLES); "" = the saved default (/setup share-style)."""
         style = style if style in X_STYLES else (self.store.get("share_x_style") or "reply")
         handles = {p["id"]: p.get("x_handle") or "" for p in self.store.people(week.group)}
-        xs = x_posts(week, handles, style)
+        xs = x_posts(week, handles, style, bold=bool(self.store.get("share_x_bold")),
+                     tags=str(self.store.get("share_x_tags") or ""))
         after = {"reply": "the X post, then its links to paste as a reply." if len(xs) > 1 else "the X post.",
                  "one": "the X post.", "thread": f"an X thread of {len(xs)} posts." if len(xs) > 1 else "the X post."}
         note = ("📋 Copy-ready calendar. Long-press (phone) or right-click (PC) a message → Copy Text. "

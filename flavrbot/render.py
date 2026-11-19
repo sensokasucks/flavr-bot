@@ -35,7 +35,7 @@ import mimetypes
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 import aiohttp
 
@@ -437,26 +437,36 @@ def day_card(week: Week, i: int, img: Img, logo: str = "") -> str:
     group's title on top, then that day's streams in a grid (thumbnail, name, time and length). X
     Articles allow only so many pictures, so the article uses one of these per day instead of one per
     stream (flavrbot/share.py ``article``; flavrbot/web.py /calendar/day.png)."""
+    date = week.start + timedelta(days=i)
+    return tiles_card(week.group, f"{date:%A} · {date:%b}".upper() + f" {date.day}", week.days[i], week.tz, img, logo)
+
+
+def tiles_card(group: str, heading: str, tiles: List[Tile], tz, img: Img, logo: str = "",
+               show_day: bool = False) -> str:
+    """Streams in a 16:9 grid under a big ``heading``: the day picture above (``day_card``) and the
+    focus pictures ("TODAY · THU NOV 19", "THIS WEEKEND", flavrbot/focus.py). ``show_day``: each
+    stream's time starts with its weekday (a picture covering more than one day)."""
     e = html.escape
-    tiles = week.days[i]
     shown = tiles if len(tiles) <= DAY_MAX else tiles[:DAY_MAX - 1]
     cols = day_columns(len(shown))
     rows = max(1, -(-len(shown) // cols))
-    date = week.start + timedelta(days=i)
     cells = ""
     for k, t in enumerate(shown):
         src = img(t.thumb) or img(t.avatar)
         style = f' style="background-image:url(&quot;{e(src, quote=True)}&quot;)"' if src else ""
-        when = clock(t.at, week.tz) + (f" · {hm(t.length)}" if t.kind == "past" and t.end else
-                                       " · LIVE" if t.kind == "live" else "")
+        day = f"{datetime.fromtimestamp(t.at, tz):%a} " if show_day else ""
+        when = day + clock(t.at, tz) + (f" · {hm(t.length)}" if t.kind == "past" and t.end else
+                                        " · LIVE" if t.kind == "live" else "")
         cells += (f'<div class="c"><i class="k{k % 4}"{style}>{_plats(t)}</i>'
                   f'<b>{e(t.name)}</b><span>{e(when)}</span></div>')
     if len(tiles) > len(shown):
         cells += f'<div class="c more">+{len(tiles) - len(shown)} more</div>'
+    if not tiles:
+        cells = '<div class="c more">Nothing on the calendar yet</div>'
     label = 24 if rows <= 2 else 20 if rows <= 3 else 16
-    head = (f'<img class="logo" src="{e(logo, quote=True)}">' if logo and week.group == "flavr" else
-            f"<em>{e(groups.name(week.group))}</em>")
-    css = (":root{" + theme(week.group) + "}*{box-sizing:border-box;margin:0}html,body{background:#0e0f14}"
+    head = (f'<img class="logo" src="{e(logo, quote=True)}">' if logo and group == "flavr" else
+            f"<em>{e(groups.name(group))}</em>")
+    css = (":root{" + theme(group) + "}*{box-sizing:border-box;margin:0}html,body{background:#0e0f14}"
            f"body{{width:{WIDTH}px;height:{HEIGHT}px;overflow:hidden;padding:30px 40px;color:#eef;"
            'font-family:"DejaVu Sans","Noto Sans","Noto Sans CJK JP",Arial,sans-serif;'
            "background-image:radial-gradient(circle at 85% -10%,var(--glow1) 0,transparent 40%),"
@@ -476,7 +486,7 @@ def day_card(week: Week, i: int, img: Img, logo: str = "") -> str:
            "display:inline-flex;align-items:center;justify-content:center;margin-left:4px}"
            ".c i .plat+.plat{right:38px}")
     return (f'<!doctype html><html><head><meta charset="utf-8"><style>{css}</style></head><body>'
-            f'<header>{head}<h1>{e(f"{date:%A} · {date:%b}".upper())} {date.day}</h1>'
+            f'<header>{head}<h1>{e(heading)}</h1>'
             f'<span>{len(tiles)} stream{"s" if len(tiles) != 1 else ""}</span></header>'
             f'<div class="g">{cells}</div></body></html>')
 

@@ -72,7 +72,8 @@ def _clean(text: str, n: int = 60) -> str:
 
 
 def _heading(week: Week) -> str:
-    return groups.heading(week.group, week.recap)
+    # a focus share (flavrbot/focus.py FocusWeek) brings its own: "Today on FlaVR", "This weekend on FlaVR"
+    return getattr(week, "heading", "") or groups.heading(week.group, week.recap)
 
 
 def discord_parts(week: Week) -> List[str]:
@@ -85,7 +86,7 @@ def discord_parts(week: Week) -> List[str]:
         if not tiles:
             continue
         date = week.start + timedelta(days=i)
-        day = [f"**{DAY_NAMES[i].title()} {date:%b} {date.day}**"]
+        day = [f"**{DAY_NAMES[(date.weekday() + 1) % 7].title()} {date:%b} {date.day}**"]
         for t in tiles:
             when = f"<t:{int(t.at)}:t>" + (f"–<t:{int(t.end)}:t>" if t.kind == "past" and t.end else "")
             what = _clean(t.title or t.game)
@@ -155,7 +156,7 @@ def _x_day(i: int, week: Week, bold: bool = False) -> str:
     Those letters are Unicode look-alikes (X has no real bold): screen readers and X search don't read
     them, so they're only ever used for these short headings, never names or titles."""
     date = week.start + timedelta(days=i)
-    text = f"{DAY_NAMES[i]} · {date:%b}".upper() + f" {date.day}"
+    text = f"{DAY_NAMES[(date.weekday() + 1) % 7]} · {date:%b}".upper() + f" {date.day}"
     return "".join(BOLD.get(c, c) for c in text) if bold else text
 
 

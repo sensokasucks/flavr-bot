@@ -36,6 +36,7 @@ png, name)`` → True/False, ``dm_owner(text, png=None)`` and ``dm_share(message
 ``cal_pin(channel, message, on)`` is optional (talent week cards are pinned with it).
 
 Talent channels (flavrbot/talent.py): ``tick`` also keeps each person's own week card and recap.
+Focus posts (flavrbot/focus.py): ``tick`` also keeps the automatic "Today" / "This weekend" posts.
 
 Share (flavrbot/share.py): after the Sunday post and the Saturday recap, when the /pings switch
 "share" is on, the owner gets copy-ready text for other Discords and X (held until quiet hours
@@ -254,6 +255,8 @@ class CalendarPoster:
         """The copy-ready texts: a short note, the Discord version, then each X post. ``style``: an X
         style (flavrbot/share.py X_STYLES); "" = the saved default (/setup share-style)."""
         style = style if style in X_STYLES else (self.store.get("share_x_style") or "reply")
+        if style == "article" and getattr(week, "heading", ""):
+            style = "reply"         # a focus share (flavrbot/focus.py): the Article page shows whole weeks only
         people = self.store.people(week.group)
         handles = {p["id"]: p.get("x_handle") or "" for p in people}
         if style == "article":
@@ -347,6 +350,8 @@ class CalendarPoster:
                 if self.store.get(f"calendar_channel.{g}"):
                     await self.refresh(g)
             await talent.refresh_all(self)  # each talent channel's week card + recap (flavrbot/talent.py)
+            from . import focus             # late import: focus.py imports this module's ``line``
+            await focus.tick(self)          # automatic "Today" / "This weekend" posts (/setup day-posts)
             self.images.prune()
             await self.flush_pings()
             await self.flush_shares()

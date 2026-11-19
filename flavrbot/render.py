@@ -441,6 +441,29 @@ def day_card(week: Week, i: int, img: Img, logo: str = "") -> str:
     return tiles_card(week.group, f"{date:%A} · {date:%b}".upper() + f" {date.day}", week.days[i], week.tz, img, logo)
 
 
+GRID_W, GRID_H = WIDTH - 80, 750      # the tile area under the heading (body padding 40 px a side)
+GRID_GAP_X, GRID_GAP_Y = 18, 16
+
+
+def tile_layout(n: int) -> tuple:
+    """(columns, rows, tile width px, label font px) for ``n`` tiles on a day / focus picture.
+    Every tile keeps the 16:9 shape of a stream thumbnail (a wider box would crop the picture's top
+    and bottom, Sen 2026-11-19), so the columns are picked to make the tiles as big as fits, and the
+    grid is centred (empty space at the sides or bottom rather than cut-off thumbnails)."""
+    n = max(1, n)
+    best = (1, 1, 0, 24)
+    for cols in range(1, min(n, 6) + 1):
+        rows = -(-n // cols)
+        label = 24 if rows <= 2 else 20 if rows <= 3 else 16
+        under = 2 * label + 12                                  # name + time lines under each tile
+        high = (GRID_H - GRID_GAP_Y * (rows - 1)) / rows - under
+        wide = (GRID_W - GRID_GAP_X * (cols - 1)) / cols
+        w = int(min(wide, high * 16 / 9))
+        if w > best[2]:
+            best = (cols, rows, w, label)
+    return best
+
+
 def tiles_card(group: str, heading: str, tiles: List[Tile], tz, img: Img, logo: str = "",
                show_day: bool = False) -> str:
     """Streams in a 16:9 grid under a big ``heading``: the day picture above (``day_card``) and the
@@ -448,8 +471,7 @@ def tiles_card(group: str, heading: str, tiles: List[Tile], tz, img: Img, logo: 
     stream's time starts with its weekday (a picture covering more than one day)."""
     e = html.escape
     shown = tiles if len(tiles) <= DAY_MAX else tiles[:DAY_MAX - 1]
-    cols = day_columns(len(shown))
-    rows = max(1, -(-len(shown) // cols))
+    cols, rows, tw, label = tile_layout(len(shown) + (len(tiles) > len(shown)))
     cells = ""
     for k, t in enumerate(shown):
         src = img(t.thumb) or img(t.avatar)
@@ -463,7 +485,6 @@ def tiles_card(group: str, heading: str, tiles: List[Tile], tz, img: Img, logo: 
         cells += f'<div class="c more">+{len(tiles) - len(shown)} more</div>'
     if not tiles:
         cells = '<div class="c more">Nothing on the calendar yet</div>'
-    label = 24 if rows <= 2 else 20 if rows <= 3 else 16
     head = (f'<img class="logo" src="{e(logo, quote=True)}">' if logo and group == "flavr" else
             f"<em>{e(groups.name(group))}</em>")
     css = (":root{" + theme(group) + "}*{box-sizing:border-box;margin:0}html,body{background:#0e0f14}"
@@ -475,13 +496,16 @@ def tiles_card(group: str, heading: str, tiles: List[Tile], tz, img: Img, logo: 
            ".logo{height:60px;filter:drop-shadow(0 0 1px #fff) drop-shadow(0 0 1px #fff)} header em{font-style:normal;"
            "font-size:34px;font-weight:800;color:var(--c4)} h1{font-size:46px;font-weight:800;letter-spacing:3px;color:var(--c1)}"
            "header span{margin-left:auto;font-size:22px;color:#aab}"
-           f".g{{display:grid;grid-template-columns:repeat({cols},1fr);grid-template-rows:repeat({rows},1fr);gap:16px 18px;height:750px}}"
-           ".c{display:flex;flex-direction:column;min-height:0;min-width:0}"
-           ".c i{flex:1;min-height:0;border-radius:12px;background:#1b1d26 center/cover no-repeat;border:3px solid var(--c1);position:relative}"
+           # a wrapping row exactly ``cols`` tiles wide, centred both ways: a short last row sits in the middle
+           f".g{{display:flex;flex-wrap:wrap;justify-content:center;align-content:center;gap:{GRID_GAP_Y}px {GRID_GAP_X}px;"
+           f"height:{GRID_H}px;width:{cols * tw + (cols - 1) * GRID_GAP_X}px;margin:0 auto}}"
+           f".c{{display:flex;flex-direction:column;width:{tw}px}}"
+           ".c i{display:block;aspect-ratio:16/9;border-radius:12px;background:#1b1d26 center/cover no-repeat;"
+           "border:3px solid var(--c1);position:relative}"
            ".c i.k1{border-color:var(--c2)}.c i.k2{border-color:var(--c3)}.c i.k3{border-color:var(--c4)}"
            f".c b{{font-size:{label}px;margin-top:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}"
            f".c span{{font-size:{label - 4}px;color:#ccd;white-space:nowrap}}"
-           ".c.more{align-items:center;justify-content:center;font-size:28px;color:#aab}"
+           f".c.more{{align-items:center;justify-content:center;font-size:28px;color:#aab;height:{round(tw * 9 / 16)}px}}"
            ".plat{position:absolute;top:8px;right:8px;width:26px;height:26px;border-radius:6px;font-size:14px;font-weight:800;"
            "display:inline-flex;align-items:center;justify-content:center;margin-left:4px}"
            ".c i .plat+.plat{right:38px}")

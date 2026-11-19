@@ -203,3 +203,15 @@ def test_article_titles_and_lengths_read_clean():
     assert _article_title("This Time Dark Sawrm #vtuber #flavr") == "This Time Dark Sawrm"
     assert _article_title("@here") == "here" and "@" not in _article_title("mail a@b")
     assert _hm(5 * 3600) == "5h" and _hm(6840) == "1h\u00a054m" and _hm(2400) == "40m"
+
+
+def test_day_picture_tiles_keep_the_thumbnail_shape():
+    # render.tile_layout: tiles are always 16:9 (the stream thumbnail's shape, so nothing is cropped),
+    # as big as fits in the 1520 x 750 area under the heading, with their name lines under them
+    from flavrbot.render import GRID_GAP_X, GRID_GAP_Y, GRID_H, GRID_W, tile_layout
+    for n in range(1, 21):
+        cols, rows, w, label = tile_layout(n)
+        assert cols * rows >= n and w > 100
+        assert cols * w + (cols - 1) * GRID_GAP_X <= GRID_W                                   # fits across
+        assert rows * (w * 9 / 16 + 2 * label + 12) + (rows - 1) * GRID_GAP_Y <= GRID_H + 1  # fits down
+    assert tile_layout(4)[:2] == (2, 2) and tile_layout(1)[:2] == (1, 1)

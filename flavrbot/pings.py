@@ -14,6 +14,9 @@ Kinds (each can be switched with /pings; the defaults are in KINDS):
   share    copy-ready calendar text for other Discords and X, after the Sunday post and the
            Saturday recap (flavrbot/share.py; waits for the end of quiet hours)
   growth   the server's joins and leaves last week, Sunday at MOMENTS_HOUR (flavrbot/community.py)
+  chat_moments  chat suddenly got much busier during your stream, with the Twitch clip when Core
+           made one (flavrbot/recap.py; off by default)
+  recap    the after-stream recap, a few minutes after Core says the stream ended (flavrbot/recap.py)
 
 Quiet hours (QUIET_HOURS, default 3-11 in TZ): ordinary pings wait and arrive as one message
 when quiet hours end. URGENT pings always go at once. While Core says you're live, quiet hours
@@ -48,6 +51,8 @@ KINDS: Dict[str, Tuple[str, bool]] = {
     "calendar": ("Calendar changes, with the new picture (every 10 minutes at most)", True),
     "share": ("Copy-ready calendar text for other Discords and X (Sunday + recap)", True),
     "growth": ("Server joins and leaves last week (Sunday)", True),
+    "chat_moments": ("Chat suddenly busy during your stream (with the Twitch clip if made)", False),
+    "recap": ("After-stream recap: chat, support, moments", True),
 }
 FRIENDS_EVERY = 600.0
 # Core's alert kinds (core/alerts.py KINDS in flavr-leftovers): real money, and sub gifts with a qty

@@ -2,7 +2,7 @@
 Start FlaVR Bot: ``python -m flavrbot`` (the Docker image's command).
 
 Builds, in order: settings (environment), the database, the Stream Core link (web listener),
-phone pings, the go-live watcher with its platform checkers, the Discord client (after reading which
+phone pings, the after-stream recap (flavrbot/recap.py), the go-live watcher with its platform checkers, the Discord client (after reading which
 privileged intents the developer portal allows) with server care, then the weekly
 calendar (its posts, and its pages on the same web listener), and runs them all on one event
 loop until the container stops.
@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 import aiohttp
@@ -23,6 +24,7 @@ from .bot import FlavrBot
 from .calendar_post import CalendarPoster
 from .core_link import CoreLink
 from .pings import Pinger
+from .recap import Recapper
 from .platforms.kick import Kick
 from .platforms.twitch import Twitch
 from .platforms.youtube import YouTube
@@ -74,12 +76,23 @@ async def main() -> int:
         async def on_core_stream(change):
             # Stream Core's own start / end: the phone ping, then live mode (flavrbot/community.py)
             await pinger.on_stream(change)
+            await recapper.on_stream(change)
             ev = change.get("event")
             if ev in ("started", "resumed", "ended"):
                 await bot.community.live_mode(ev != "ended", str(change.get("game") or ""))
 
+        # after-stream recap + chat moments (flavrbot/recap.py): keeps alerts / moments, posts RECAP_DELAY_MIN
+        # after Core says the stream ended, to /setup recap-channel and the owner's DMs (/pings recap)
+        recapper = Recapper(store, bot.post_text, pinger.ping, lambda: link.heartbeat, delay_min=s.recap_delay_min,
+                            ollama_url=s.ollama_url, ollama_model=s.ollama_model, tz=ZoneInfo(s.timezone))
+
+        async def on_core_alert(a):
+            await pinger.on_alert(a)
+            await recapper.on_alert(a)
+
         link.on_stream = on_core_stream
-        link.on_alert = pinger.on_alert
+        link.on_alert = on_core_alert
+        link.on_moment = recapper.on_moment
         link.on_core_lost = pinger.core_lost
         link.on_core_back = pinger.core_back
         shooter = Screenshotter(s.chromium_path)
@@ -137,7 +150,8 @@ async def main() -> int:
                  asyncio.create_task(after_ready(poster.run), name="calendar"),
                  asyncio.create_task(after_ready(watcher.run_schedules), name="schedules"),
                  asyncio.create_task(after_ready(bot.care.run_backups), name="backups"),
-                 asyncio.create_task(after_ready(bot.community.run_daily), name="moments")]
+                 asyncio.create_task(after_ready(bot.community.run_daily), name="moments"),
+                 asyncio.create_task(after_ready(recapper.run), name="recap")]
         for platform, checker in checkers.items():
             if checker.ready:
                 tasks.append(asyncio.create_task(watch(platform), name=f"watch-{platform}"))

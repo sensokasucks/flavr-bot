@@ -25,7 +25,7 @@ async def test_commands_register():
     group = next(c for c in bot.tree.get_commands() if c.name == "group")
     assert sorted(c.name for c in group.commands) == ["add", "edit", "list", "remove"]
     setup = next(c for c in bot.tree.get_commands() if c.name == "setup")
-    assert sorted(c.name for c in setup.commands) == ["calendar-channel", "check", "live-channel", "mod-log",
+    assert sorted(c.name for c in setup.commands) == ["calendar-channel", "check", "day-posts", "live-channel", "mod-log",
                                                       "modmail", "moments", "share-style", "starboard"]
     # without the developer-portal switches the bot asks for neither privileged intent (it would be refused)
     assert not bot.intents.members and not bot.intents.message_content

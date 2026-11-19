@@ -23,6 +23,9 @@ up to an hour to show the first time):
     /setup live-channel group channel                   where go-live posts go for a group
     /setup calendar-channel group channel               where the weekly calendar + recap go
     /calendar post [group]  a fresh calendar post now
+    /calendar focus when [group] [post]   just today / tomorrow / the weekend / a weekday (flavrbot/focus.py);
+                        anyone sees it themselves, post (owner or Manage Server) puts it in the channel
+    /setup day-posts group [channel] [hour] [daily] [weekend]   automatic Today / This weekend posts
     /calendar refresh [week]  fill a week in again from the channels' past streams (VODs)
     /calendar share [group] [week] [style]   DMs you copy-ready text for other Discords and X (flavrbot/share.py)
     /setup share-style style [bold_days] [hashtags]   the X text's default layout (post + links reply /
@@ -70,7 +73,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import discord
 from discord import app_commands
 
-from . import sysinfo, wol
+from . import focus, sysinfo, wol
 from .calendar import DAY_NAMES
 from .config import Settings
 from .server_care import MAX_ROLE_BUTTONS, ServerCare, missing
@@ -113,6 +116,8 @@ def make_embed(data: Dict[str, Any], picture: str = "") -> discord.Embed:
         e.add_field(name=name[:256], value=value[:1024], inline=False)
     if data.get("empty"):
         e.description = "Nothing on the calendar yet this week."
+    if data.get("description"):                     # flavrbot/focus.py: a day with nothing on it
+        e.description = data["description"][:4096]
     if data.get("footer"):
         e.set_footer(text=data["footer"][:2048])
     if picture:
@@ -829,6 +834,35 @@ class FlavrBot(discord.Client):
             await inter.followup.send(embed=make_embed(cal_embed(w), name if png else ""), files=files,
                                       ephemeral=True, allowed_mentions=NO_PINGS)
 
+        focus_choices = [app_commands.Choice(name=n, value=v) for n, v in
+                         [("Today", "today"), ("Tomorrow", "tomorrow"), ("This weekend (Sat + Sun)", "weekend")] +
+                         [(d.title(), d) for d in focus.WEEKDAYS]]
+
+        @calendar.command(name="focus", description="Just one day or the weekend: today, tomorrow, a weekday")
+        @app_commands.choices(when=focus_choices)
+        @app_commands.autocomplete(group=group_auto)
+        @app_commands.describe(post="Post it in this channel for everyone (owner or Manage Server)")
+        async def calendar_focus(inter: discord.Interaction, when: app_commands.Choice[str], group: Optional[str] = None,
+                                 post: Optional[bool] = False):
+            # flavrbot/focus.py: the board's streams for those days, picture + list; in a talent channel only them
+            if not bot.calendar:
+                await inter.response.send_message("The calendar isn't running.", ephemeral=True)
+                return
+            if post and not await managers_only(inter):
+                return
+            here = talent.person_for_channel(bot.store, inter.channel_id) if not group else None
+            g = here.get("grp") or "flavr" if here else await pick_group(inter, group)
+            if g is None:
+                return
+            await inter.response.defer(ephemeral=not post, thinking=True)
+            label, dates = focus.pick_days(when.value, bot.calendar.clock(), bot.calendar.tz)
+            f = focus.build(bot.calendar, g, label, dates, here["id"] if here else 0)
+            png = await focus.png(bot.calendar, f)
+            name = f"{when.value}.png"
+            files = [discord.File(io.BytesIO(png), filename=name)] if png else []
+            await inter.followup.send(embed=make_embed(focus.embed(f, here["name"] if here else ""), name if png else ""),
+                                      files=files, ephemeral=not post, allowed_mentions=NO_PINGS)
+
         @calendar.command(name="post", description="Post a fresh calendar now (owner or Manage Server)")
         @app_commands.autocomplete(group=group_auto)
         async def calendar_post_now(inter: discord.Interaction, group: Optional[str] = None):
@@ -917,6 +951,35 @@ class FlavrBot(discord.Client):
                 bot.calendar.poke()
             await inter.response.send_message(f"The {groups.name(g)} calendar goes to {channel.mention}; the first post "
                                               "comes within a minute.", ephemeral=True)
+
+        @setup.command(name="day-posts", description="Automatic Today / This weekend posts (leave out channel to stop)")
+        @app_commands.autocomplete(group=group_auto)
+        @app_commands.describe(channel="Where they go (left out: stop them)", hour="Hour of day, 0-23 (default 10)",
+                               daily="A Today post on days with streams (default on)",
+                               weekend="A This weekend post on Fridays (default on)")
+        async def setup_day_posts(inter: discord.Interaction, group: str, channel: Optional[discord.TextChannel] = None,
+                                  hour: Optional[app_commands.Range[int, 0, 23]] = None,
+                                  daily: Optional[bool] = None, weekend: Optional[bool] = None):
+            # kv day_posts.<group>, read by flavrbot/focus.py tick (every minute, inside the calendar loop)
+            if not await managers_only(inter):
+                return
+            g = await pick_group(inter, group)
+            if g is None:
+                return
+            old = bot.store.get(f"day_posts.{g}") or {}
+            if channel is None:
+                bot.store.put(f"day_posts.{g}", {})
+                await inter.response.send_message(f"No more automatic day posts for {groups.name(g)}.", ephemeral=True)
+                return
+            s = {"channel": str(channel.id), "hour": hour if hour is not None else int(old.get("hour", focus.DEFAULT_HOUR)),
+                 "daily": daily if daily is not None else bool(old.get("daily", True)),
+                 "weekend": weekend if weekend is not None else bool(old.get("weekend", True))}
+            bot.store.put(f"day_posts.{g}", s)
+            at = f"{(s['hour'] % 12) or 12} {'AM' if s['hour'] < 12 else 'PM'}"
+            what = [w for w, on in ((f"a Today post every day at {at} when something's on", s["daily"]),
+                                    (f"a This weekend post Fridays at {at}", s["weekend"])) if on]
+            await inter.response.send_message(f"{groups.name(g)} in {channel.mention}: " + (" and ".join(what) or "nothing (both off)")
+                                              + ". Each is updated through the day as people go live and end.", ephemeral=True)
 
         @setup.command(name="share-style", description="Default layout of the copy-ready X text")
         @app_commands.choices(style=[app_commands.Choice(name=label, value=k) for k, (label, _) in X_STYLES.items()])

@@ -255,6 +255,8 @@ class CalendarPoster:
         """The copy-ready texts: a short note, the Discord version, then each X post. ``style``: an X
         style (flavrbot/share.py X_STYLES); "" = the saved default (/setup share-style)."""
         style = style if style in X_STYLES else (self.store.get("share_x_style") or "reply")
+        if style == "article" and getattr(week, "heading", ""):
+            style = "reply"         # a focus share (flavrbot/focus.py): the Article page shows whole weeks only
         people = self.store.people(week.group)
         handles = {p["id"]: p.get("x_handle") or "" for p in people}
         if style == "article":

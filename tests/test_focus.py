@@ -54,13 +54,13 @@ async def test_automatic_day_posts(tmp_path):
     store.add_manual(lulu, 6, 19 * 60, "Sat stream")
     await p.tick()
     assert d.sent == []                                       # off until /setup day-posts
-    store.put("day_posts.flavr", {"channel": "77", "hour": 10, "daily": True, "weekend": True})
+    store.put("day_posts.flavr", {"channel": "77", "today": 600, "tomorrow": None, "weekend": 600, "weekend_day": 5})
     await p.tick()
     assert d.sent == []                                       # before 10 AM
     clock["t"] = ts(2026, 11, 19, 10, 1)
     await p.tick()
     await p.tick()
-    assert d.sent == [("77", "Today on FlaVR · Thu Nov 19", "daily-2026-11-19.png")]   # once
+    assert d.sent == [("77", "Today on FlaVR · Thu Nov 19", "today-2026-11-19.png")]   # once
     # she goes live: the post is edited in place
     s = store.start_session(lulu, ts(2026, 11, 19, 19, 2), platforms=["youtube"], title="Cozy", url="https://youtu.be/x")
     clock["t"] = ts(2026, 11, 19, 19, 5)
@@ -70,10 +70,41 @@ async def test_automatic_day_posts(tmp_path):
     clock["t"] = ts(2026, 11, 20, 0, 5)                       # past midnight: one last look, then left alone
     await p.tick()
     assert len(d.edits) == 2
-    assert store.get("day_post.flavr.daily")["message"] == ""
+    assert store.get("day_post.flavr.today")["message"] == ""
     # Friday: no Today post (nothing on), but the weekend one
     clock["t"] = ts(2026, 11, 20, 10, 1)
     await p.tick()
     assert d.sent[1:] == [("77", "This weekend on FlaVR · Nov 21–22", "weekend-2026-11-21.png")]
     await p.tick()
     assert len(d.sent) == 2
+
+
+async def test_tomorrow_preview_weekend_day_and_share(tmp_path):
+    store, lulu, pip, sen = setup()
+    clock = {"t": ts(2026, 11, 19, 20, 1)}                    # Thursday 8:01 PM
+    d = FakeDiscord()
+    shared = []
+
+    async def dm_share(messages, png, user_id=0):
+        shared.append(messages)
+
+    d.dm_share = dm_share
+    p = CalendarPoster(store, d, ImageCache(tmp_path), None, clock=lambda: clock["t"], share_on=lambda: True)
+    store.add_manual(lulu, 5, 19 * 60, "Fri stream")
+    store.add_manual(sen, 6, 15 * 60, "Sat stream")
+    # Tomorrow preview at 8 PM; weekend post moved to Thursday 6 PM
+    store.put("day_posts.flavr", {"channel": "77", "today": None, "tomorrow": 20 * 60, "weekend": 18 * 60,
+                                  "weekend_day": 4})
+    await p.tick()
+    assert d.sent == [("77", "Tomorrow on FlaVR · Fri Nov 20", "tomorrow-2026-11-20.png"),
+                      ("77", "This weekend on FlaVR · Nov 21–22", "weekend-2026-11-21.png")]
+    # /pings share on: the copy-ready texts follow each automatic post
+    assert len(shared) == 2 and "Tomorrow on FlaVR" in shared[0][1] and "Fri stream" in "".join(shared[0])
+    assert "This weekend on FlaVR" in shared[1][1] and "Sat stream" in "".join(shared[1])
+    # /calendar share when:weekend, X Article style falls back to the post + links reply
+    assert await focus.share(p, "flavr", "weekend", "article")
+    texts = shared[-1]
+    assert "Nov 21–22" in texts[1] and not any("Article" in x for x in texts)
+    # real weekdays, not positions in a week (Saturday is the focus's first day, a week's Sunday slot)
+    assert "**Sat Nov 21**" in texts[1] and any("SAT · NOV 21" in x for x in texts)
+    assert not any("Sun Nov 21" in x or "SUN · NOV 21" in x for x in texts)

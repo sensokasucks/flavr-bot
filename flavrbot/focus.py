@@ -18,16 +18,24 @@ Which days (``pick_days``, local time in TZ):
 Two ways to get one:
   /calendar focus when [group] [post]   (flavrbot/bot.py) only you see it; ``post`` puts it in the
                        channel (owner or Manage Server). In a talent channel: only that person.
-  Automatic, per group, OFF until /setup day-posts picks a channel:
-    daily    at ``hour`` (TZ, default 10) a "Today" post, only on days with something on it
-    weekend  Friday at ``hour`` a "This weekend" post
+  Automatic, per group, OFF until /setup day-posts picks a channel; each time can be set or "off":
+    today     a "Today" post at that time (TZ, default 10 AM), only on days with something on it
+    tomorrow  an evening "Tomorrow" preview (default off), only when tomorrow has something on it
+    weekend   a "This weekend" post on ``weekend_day`` (default Friday) at that time (default 10 AM)
     Each post is edited in place until its last day ends (planned → live → done with length and
     VOD link), like the weekly board: on a change, and every LIVE_REDRAW while someone is live.
+    With the /pings switch "share" on, each automatic post is followed by the copy-ready share
+    DM for those days (held during quiet hours), like the weekly post.
+
+Share: ``share`` / ``as_week`` give /calendar share's `when` option the same copy-ready Discord and X
+texts as the weekly share (flavrbot/share.py), for just those days. The X Article style needs a
+whole week's page, so focus shares fall back to the "post + links reply" style.
 
 Saved in kv:
-  day_posts.<group>        {channel, hour, daily, weekend}   (/setup day-posts)
-  day_post.<group>.<kind>  {key, label, dates, channel, message, sig, drawn_at, until}  kind = daily /
-                           weekend; ``key`` = the first date (ISO), so each day / weekend posts once
+  day_posts.<group>        {channel, today, tomorrow, weekend, weekend_day}   (/setup day-posts; the
+                           three times are minutes after midnight in TZ or None = off; weekend_day 0 = Sunday)
+  day_post.<group>.<kind>  {key, label, dates, channel, message, sig, drawn_at, until}  kind = today /
+                           tomorrow / weekend; ``key`` = the first date (ISO), so each posts once
 
 Who calls it: CalendarPoster.tick (flavrbot/calendar_post.py) runs ``tick`` every minute inside its
 lock; flavrbot/bot.py's /calendar focus uses ``pick_days``, ``build`` , ``embed`` and ``png``.
@@ -50,7 +58,9 @@ log = logging.getLogger("flavrbot.focus")
 
 WEEKDAYS = ("sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday")
 WHEN = ("today", "tomorrow", "weekend") + WEEKDAYS          # /calendar focus choices
-DEFAULT_HOUR = 10                                           # automatic posts, TZ (Sen's preview hour)
+DEFAULT_TIME = 10 * 60                                      # automatic posts: minutes after midnight, TZ
+DEFAULT_WEEKEND_DAY = 5                                     # Friday (0 = Sunday)
+KINDS = ("today", "tomorrow", "weekend")                    # automatic post kinds, in posting order
 LIVE_REDRAW = 20 * 60.0                                     # same rhythm as the weekly board
 FIELD_MAX = 1024                                            # Discord: one embed field
 
@@ -165,28 +175,35 @@ def settings(store: Any, group: str) -> Dict[str, Any]:
     return s if s.get("channel") else {}
 
 
+def due(s: Dict[str, Any], kind: str, local: datetime) -> bool:
+    """Is ``kind``'s time today reached (and, for the weekend post, is it its day)?"""
+    at = s.get(kind)
+    if at is None:
+        return False
+    if kind == "weekend" and (local.weekday() + 1) % 7 != int(s.get("weekend_day", DEFAULT_WEEKEND_DAY)):
+        return False
+    return local.hour * 60 + local.minute >= int(at)
+
+
 async def tick(poster: Any) -> None:
     """Every minute (CalendarPoster.tick): new automatic posts when due, edits to the running ones."""
     now = poster.clock()
     local = datetime.fromtimestamp(now, poster.tz)
-    wday = (local.weekday() + 1) % 7
     for g in groups.keys():
         s = settings(poster.store, g)
-        for kind in ("daily", "weekend"):
+        for kind in KINDS:
             key = f"day_post.{g}.{kind}"
             post = poster.store.get(key) or {}
             if post.get("message") and now < float(post.get("until") or 0) + 3600:
                 await _edit(poster, g, key, post, final=now >= float(post.get("until") or 0))
-            if not s or not s.get(kind) or local.hour < int(s.get("hour", DEFAULT_HOUR)):
+            if not s or not due(s, kind, local):
                 continue
-            if kind == "weekend" and wday != 5:                 # Friday only
-                continue
-            label, dates = pick_days("today" if kind == "daily" else "weekend", now, poster.tz)
+            label, dates = pick_days(kind, now, poster.tz)
             if post.get("key") == dates[0].isoformat():
                 continue                                        # already posted (or found empty)
             f = build(poster, g, label, dates)
             post = {"key": dates[0].isoformat()}
-            if f.tiles():                                       # no "nothing today" posts
+            if f.tiles():                                       # no "nothing on" posts
                 pic = await png(poster, f)
                 msg = await poster.discord.cal_send(s["channel"], embed(f), pic, f"{kind}-{post['key']}.png")
                 if not msg:
@@ -195,7 +212,43 @@ async def tick(poster: Any) -> None:
                 post.update(label=label, dates=[d.isoformat() for d in dates], channel=s["channel"], message=str(msg),
                             sig=f.signature(), drawn_at=now,
                             until=datetime(end.year, end.month, end.day, tzinfo=poster.tz).timestamp())
+                poster._share_later(as_week(f), pic)            # the share DM, when /pings share is on
             poster.store.put(key, post)
+
+
+# ── share text (flavrbot/share.py works on a Week) ─────────────────────
+@dataclass
+class FocusWeek(Week):
+    """A Focus dressed as a Week for flavrbot/share.py: ``days`` are just the focused dates (they are
+    consecutive, so ``start + i days`` still finds each one's date), with its own heading and dates."""
+    heading: str = ""
+    dates_text: str = ""
+
+    @property
+    def range_text(self) -> str:            # "Thu Nov 19" / "Nov 21–22" instead of the week's range
+        return self.dates_text
+
+
+def as_week(f: Focus) -> FocusWeek:
+    d = f.dates[0]
+    joiner = "on" if f.group == "flavr" else "with"
+    return FocusWeek(group=f.group, start=datetime(d.year, d.month, d.day, tzinfo=f.tz), tz=f.tz, now=0.0,
+                     recap=False, days=f.days, quiet=[], heading=f"{f.label} {joiner} {groups.name(f.group)}",
+                     dates_text=f.date_text)
+
+
+async def share(poster: Any, group: str, when: str, style: str = "", person_id: int = 0, user_id: int = 0) -> bool:
+    """/calendar share with ``when``: DM the copy-ready texts for just those days to ``user_id``
+    (0 = the owner). ``person_id``: only that person (a talent channel; no picture then)."""
+    label, dates = pick_days(when, poster.clock(), poster.tz)
+    f = build(poster, group, label, dates, person_id)
+    pic = None if person_id else await png(poster, f)
+    try:
+        await poster.discord.dm_share(poster.share_messages(as_week(f), style), pic, user_id=user_id)
+        return True
+    except Exception:
+        log.exception("focus share DM failed")
+        return False
 
 
 async def _edit(poster: Any, group: str, key: str, post: Dict[str, Any], final: bool) -> None:

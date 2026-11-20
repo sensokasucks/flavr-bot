@@ -11,6 +11,7 @@ Calls (all documented Helix endpoints):
   GET  helix/games?id=a&id=b                box art of the scheduled games (calendar tiles)
   GET  helix/videos?user_id=&type=archive   the newest VOD after a stream ends
   GET  helix/videos?id=                     one VOD a member posted (community calendar, flavrbot/promo.py)
+  GET  helix/videos?user_id=                uploads and highlights for the reviews (every 6 h per person)
 
 Rate: Helix allows 800 points a minute for an app; the watcher uses one streams call per 100
 people every TWITCH_EVERY_SEC (default 2 minutes).
@@ -203,3 +204,21 @@ class Twitch:
                 "thumb": thumb.replace("%{width}", "640").replace("%{height}", "360") if "%{width}" in thumb else "",
                 "user_id": str(v.get("user_id") or ""), "login": str(v.get("user_login") or ""),
                 "display": str(v.get("user_name") or "")}
+
+    async def recent_uploads(self, platform_id: str, since: float) -> List[Dict[str, Any]]:
+        """Uploads and highlights (not past broadcasts) published since ``since``, for the reviews'
+        "Also this week" list. Helix /videos?user_id= (all types, newest 20), 1 call; flavrbot/watcher.py
+        asks once per refresh_schedules round. → [{video_id, kind ("video" / "highlight"), at, title,
+        url, thumb, length}]"""
+        data = await self._get("/videos", [("user_id", platform_id), ("first", "20")])
+        out = []
+        for v in data.get("data") or []:
+            kind = {"upload": "video", "highlight": "highlight"}.get(str(v.get("type") or ""))
+            at = iso_ts(str(v.get("published_at") or v.get("created_at") or ""))
+            if not kind or not at or at < since:
+                continue
+            thumb = str(v.get("thumbnail_url") or "")
+            out.append({"video_id": str(v.get("id") or ""), "kind": kind, "at": at, "title": str(v.get("title") or ""),
+                        "url": str(v.get("url") or ""), "length": duration_sec(str(v.get("duration") or "")),
+                        "thumb": thumb.replace("%{width}", "640").replace("%{height}", "360") if "%{width}" in thumb else ""})
+        return out

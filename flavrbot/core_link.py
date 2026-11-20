@@ -23,7 +23,12 @@ What this file does with them (``CoreLink``):
     it) for /said (flavrbot/said.py). Every answer carries ``chat_since``, so Core knows which
     lines to send next (a new or wiped copy fills itself in from Core's history);
   * watches the heartbeat: no heartbeat for HEARTBEAT_LATE_SEC while Core last said "live" calls
-    ``on_core_lost()``; the next heartbeat after that calls ``on_core_back()``.
+    ``on_core_lost()``; the next heartbeat after that calls ``on_core_back()``. Two things keep
+    that alarm quiet after a stream that simply ended (Sen 2026-11-20: Core was closed before it
+    noticed the stream end, so the bot still thought "live"): ``owner_live()`` (the go-live
+    watcher, set by flavrbot/__main__.py) saying the owner is offline everywhere counts as "the
+    stream ended", and ``mark_done()`` (/core done) ends it by hand and stays quiet until Core's
+    next heartbeat.
 
 Only listens on the home network (LISTEN_HOST / LISTEN_PORT, default 0.0.0.0:3870). Never forward
 this port on the router: the password is the only lock.
@@ -60,6 +65,10 @@ class CoreLink:
         self.on_core_lost: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
         self.on_core_back: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
         self.lost = False                       # True after on_core_lost until a heartbeat comes
+        self.quiet_back = False                 # the next heartbeat after mark_done says nothing
+        # the go-live watcher's view of the owner: True live somewhere, False offline everywhere,
+        # None unknown (no owner followed). Set by flavrbot/__main__.py (Watcher.owner_live).
+        self.owner_live: Callable[[], Optional[bool]] = lambda: None
         self.heartbeat: Dict[str, Any] = store.get("core.heartbeat", {}) or {}
         self.heartbeat_at: Optional[float] = store.get("core.heartbeat_at")
         self.snapshot: Dict[str, Any] = store.get("core.snapshot", {}) or {}
@@ -127,7 +136,9 @@ class CoreLink:
             self.store.put("core.heartbeat_at", now)
             if self.lost:
                 self.lost = False
-                if self.on_core_back:
+                if self.quiet_back:             # ended by hand (/core done): no "answering again" ping
+                    self.quiet_back = False
+                elif self.on_core_back:
                     await self.on_core_back(self.stream())
         elif kind == "snapshot" and isinstance(data, dict):
             # keep the old points / queue when one part is missing (that switch is off in Core)
@@ -166,9 +177,27 @@ class CoreLink:
         if self.lost or not self.heartbeat_at:
             return
         if self.clock() - self.heartbeat_at >= self.late_sec and self.stream().get("state") in ("live", "dropped"):
+            if self.owner_live() is False:
+                # the watcher sees the owner offline on every platform: the stream ended and Core was
+                # closed before it said so. Not a crash, so no alarm.
+                self.mark_done(quiet=False)
+                log.info("Core went quiet after the stream ended (offline everywhere); no alarm")
+                return
             self.lost = True
             if self.on_core_lost:
                 await self.on_core_lost({"silent_sec": int(self.clock() - self.heartbeat_at), **self.stream()})
+
+    def mark_done(self, quiet: bool = True) -> bool:
+        """The stream is over (/core done, or check_late seeing the owner offline): Core's last word
+        becomes "offline", so its silence no longer alarms. ``quiet``: also skip the "answering
+        again" ping when Core comes back. Returns True when it thought the stream was still on."""
+        was = self.stream().get("state") in ("live", "dropped")
+        self.heartbeat = {**self.heartbeat, "stream": {**self.stream(), "state": "offline", "live": False}}
+        self.store.put("core.heartbeat", self.heartbeat)
+        if quiet:
+            self.lost = True
+            self.quiet_back = True
+        return was
 
     async def _watch_loop(self) -> None:
         while True:

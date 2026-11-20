@@ -9,7 +9,8 @@ What a talent channel gets, once /talent channel picks it:
                   posted Sunday at CALENDAR_PREVIEW_HOUR, pinned, and edited in place whenever her
                   week changes. Made by ``week_card`` from the group's calendar week (flavrbot/calendar.py)
                   filtered to her.
-  her recap       Saturday at CALENDAR_RECAP_HOUR: her streams, hours, longest stream, VOD links.
+  her reviews     with the group's (Friday: Mon-Thu, Monday: Fri-Sun; /setup review-times): her
+                  streams, hours, longest stream, VOD links, and her videos / Shorts / premieres.
   commands        /live, /schedule, /calendar view and /calendar share used IN her channel show only
                   her (``person_for_channel``); everywhere else they work as before.
 
@@ -20,7 +21,7 @@ Manage Server (who can do all of it with /talent and /friend).
 
 Saved: people.talent_channel / discord_user / live_group / live_own (flavrbot/store.py), and in kv
   talent_post.<person id>   {week, channel, message, sig}: the current week card
-  talent_recap.<person id>  the week (ISO date of its Sunday) whose recap was posted
+  talent_recap.<person id>  "<label>:<first day>" of the newest review posted ("week:2026-11-16")
 
 Who calls it: CalendarPoster.tick (flavrbot/calendar_post.py) calls ``refresh_all`` every minute and
 after a poke; flavrbot/bot.py calls ``register`` for the commands and ``person_for_channel`` /
@@ -76,7 +77,8 @@ def live_channels(store: Store, person: Dict[str, Any]) -> List[str]:
 def only(week: Week, person_id: int) -> Week:
     """The same week with only one person's streams (her week card, /calendar in her channel)."""
     days = [[t for t in d if t.person_id == person_id] for d in week.days]
-    return dataclasses.replace(week, days=days, quiet=[])
+    uploads = [u for u in week.uploads if u.get("person_id") == person_id]     # a review's videos: hers only
+    return dataclasses.replace(week, days=days, quiet=[], uploads=uploads)
 
 
 # ── her week (text card) ───────────────────────────────────────────────
@@ -87,7 +89,8 @@ def week_card(week: Week, name: str) -> Dict[str, Any]:
     from .calendar_post import embed     # late import: calendar_post imports this module
     data = embed(week)
     if week.recap:
-        data["title"] = f"📼 {name} · week in review · {week.range_text}"
+        span = "weekend" if week.label == "weekend" else "week"          # calendar.py REVIEWS label
+        data["title"] = f"📼 {name} · {span} in review · {week.range_text}"
         past = [t for t in week.tiles() if t.kind == "past"]
         if past:
             top = max(past, key=lambda t: t.length)
@@ -107,10 +110,10 @@ def week_card(week: Week, name: str) -> Dict[str, Any]:
 
 
 async def refresh_all(poster: Any) -> None:
-    """Bring every talent channel's week card (and Saturday recap) up to date. Called by
+    """Bring every talent channel's week card (and Friday / Monday reviews) up to date. Called by
     CalendarPoster.tick under its lock; same rhythm as the group posts (flavrbot/calendar_post.py):
     a new card each Sunday from CALENDAR_PREVIEW_HOUR, edits in place when her week changes, the
-    recap once on Saturday from CALENDAR_RECAP_HOUR."""
+    reviews once each, at the group reviews' times."""
     for p in poster.store.people():
         if p.get("talent_channel"):
             try:
@@ -129,10 +132,18 @@ async def refresh_one(poster: Any, person: Dict[str, Any]) -> None:
     key = this_week.date().isoformat()
     group = person.get("grp") or "flavr"
 
-    if wday == 6 and local.hour >= poster.recap_hour and store.get(f"talent_recap.{pid}") != key:
-        week = only(poster.build(group, this_week, recap=True), pid)
+    # her own reviews, with the group's (calendar_post.py): Friday Mon-Thu, Monday Fri-Sun
+    from .calendar import review_range
+    from .calendar_post import REVIEW_WEEKDAY
+    for label, at in poster.review_times().items():
+        if at is None or local.weekday() != REVIEW_WEEKDAY[label] or local.hour * 60 + local.minute < at:
+            continue
+        rkey = f"{label}:{review_range(label, now, poster.tz)[0].date().isoformat()}"
+        if store.get(f"talent_recap.{pid}") == rkey:
+            continue
+        week = only(poster.build_review(group, label), pid)
         if await d.cal_send(channel, week_card(week, person["name"]), None, ""):
-            store.put(f"talent_recap.{pid}", key)
+            store.put(f"talent_recap.{pid}", rkey)
 
     post = store.get(f"talent_post.{pid}") or {}
     if post.get("channel") and post["channel"] != channel:
@@ -202,7 +213,7 @@ def register(tree: app_commands.CommandTree, bot: Any,
         store.put(f"talent_post.{p['id']}", {})
         poke()
         await say(inter, f"{channel.mention} is {p['name']}'s channel now: go-live cards, a pinned card with their "
-                         "week, and the Saturday recap. Commands used there show only them." if channel else
+                         "week, and their Friday and Monday reviews. Commands used there show only them." if channel else
                   f"{p['name']} has no channel of their own now.")
 
     @talent.command(name="link", description="Link someone's Discord account, so they can use /me")

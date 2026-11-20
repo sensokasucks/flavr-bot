@@ -126,21 +126,26 @@ def remove(key: str) -> bool:
     return True
 
 
-def title(key: str, recap: bool) -> str:
-    """The board's heading: FlaVR keeps "THIS WEEK" (its logo says the rest)."""
+def title(key: str, recap: bool, label: str = "") -> str:
+    """The board's heading: FlaVR keeps "THIS WEEK" (its logo says the rest). ``label`` "weekend" = the
+    weekend review (flavrbot/calendar.py REVIEWS; "week" reads like the old recap)."""
+    what = "WEEKEND IN REVIEW" if label == "weekend" else "WEEK IN REVIEW"
     if key == "flavr":
-        return "WEEK IN REVIEW" if recap else "THIS WEEK"
+        return what if recap else "THIS WEEK"
     n = name(key).upper()
+    if recap:
+        return f"{n}: {what}"
     if key == "community":
-        return f"{n}: WEEK IN REVIEW" if recap else f"{n} STREAMS THIS WEEK"
-    return f"{n}: WEEK IN REVIEW" if recap else f"THIS WEEK WITH {n}"
+        return f"{n} STREAMS THIS WEEK"
+    return f"THIS WEEK WITH {n}"
 
 
-def heading(key: str, recap: bool) -> str:
-    """Plain-text heading for posts and share text: "This week in FlaVR", "Art Pals week in review"."""
+def heading(key: str, recap: bool, label: str = "") -> str:
+    """Plain-text heading for posts and share text: "This week in FlaVR", "Art Pals week in review",
+    "FlaVR weekend in review" (``label`` "weekend")."""
     n = name(key)
     if recap:
-        return f"{n} week in review"
+        return f"{n} {'weekend' if label == 'weekend' else 'week'} in review"
     if key == "community":
         return f"{n} streams this week"
     return f"This week in {n}" if key == "flavr" else f"This week with {n}"

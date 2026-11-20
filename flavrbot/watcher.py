@@ -34,7 +34,11 @@ Weeks the bot wasn't watching (it only knows what it saw live): ``backfill(start
 each platform for the streams that FINISHED in that time (Twitch past broadcasts, YouTube's uploads
 list with real start / end times; Kick's API has no list of past streams) and saves the ones the
 watcher didn't already have as normal sessions marked source "vod". flavrbot/calendar_post.py
-calls it (``ensure_backfill``) for last week, at start-up, and before the Saturday recap.
+calls it (``ensure_backfill``) for last week, at start-up, and before each review. Twitch's list
+is free (rate limit only), so it is asked for everyone. YouTube's costs quota, so it is asked
+only for ACTIVE people (owner 2026-11-20): someone the free checks saw stream or post a video in
+those days (store.last_activity), and only once per new activity: kv "yt_backfill.<start>"
+remembers {person id: when checked}. ``everyone=True`` (/calendar refresh by hand) asks everyone.
 
 What happens on a change is the bot's business (flavrbot/bot.py ``LivePoster``): ``on_start``
 posts in the person's group channel and returns where, ``on_change`` edits it when the
@@ -130,6 +134,12 @@ class Watcher:
         if platform == "youtube":
             # the same check found the waiting rooms (scheduled streams); save them for the calendar
             upcoming = getattr(checker, "upcoming", {}) or {}
+            self.record_uploads("youtube", accounts, getattr(checker, "new_uploads", {}) or {})
+            # the free feed reads: when each person last posted anything (the reviews' activity flag)
+            posted = getattr(checker, "posted", {}) or {}
+            for a in accounts:
+                if posted.get(a["platform_id"]):
+                    self.store.note_activity(a["person_id"], posted[a["platform_id"]], now=self.clock())
             for a in accounts:
                 items = [dict(i, key=i.get("video_id") or i.get("url")) for i in upcoming.get(a["platform_id"], [])
                          if i.get("at")]
@@ -148,12 +158,29 @@ class Watcher:
                 except Exception:
                     log.exception("on_scheduled failed")
 
+    def record_uploads(self, platform: str, accounts: List[Dict[str, Any]], found: Dict[str, List[Dict[str, Any]]]) -> int:
+        """Save non-stream videos (``found``: {platform_id: [entry]}) for the reviews' "Also this week"
+        (store table "uploads"). Returns how many were new."""
+        new = 0
+        for a in accounts:
+            for u in found.get(a["platform_id"], []):
+                new += self.store.add_upload(a["person_id"], platform, u["video_id"], u["kind"], u["at"], u.get("title") or "",
+                                             u.get("url") or "", u.get("thumb") or "", float(u.get("length") or 0))
+        return new
+
     async def refresh_schedules(self) -> None:
-        """Twitch schedules of everyone followed (YouTube's come with each YouTube check)."""
+        """Twitch schedules of everyone followed (YouTube's come with each YouTube check), and their
+        Twitch uploads and highlights for the reviews."""
         tw = self.checkers.get("twitch")
         if not tw or not getattr(tw, "ready", True) or not hasattr(tw, "schedule"):
             return
         for a in [a for a in self.store.accounts("twitch") if a["platform_id"]]:
+            if hasattr(tw, "recent_uploads"):
+                try:
+                    found = await tw.recent_uploads(a["platform_id"], self.clock() - 8 * 86400)
+                    self.record_uploads("twitch", [a], {a["platform_id"]: found})
+                except Exception as e:
+                    log.info("Twitch uploads for %s failed: %s", a["handle"], e)
             try:
                 segs = await tw.schedule(a["platform_id"], limit=10)
             except Exception as e:
@@ -206,7 +233,13 @@ class Watcher:
                 return links[p].rstrip("/") + "/videos", ""
         return "", ""
 
-    async def backfill(self, start: float, end: float) -> int:
+    def _youtube_due(self, person_id: int, start: float, end: float, done: Dict[str, float]) -> bool:
+        """backfill: ask YouTube (quota) about this person? Only when something of theirs happened in
+        [start, end) after their last YouTube look-up for these days (``done``: {person id: unix s})."""
+        last = self.store.last_activity(person_id, start, end)
+        return last > 0 and last > float(done.get(str(person_id), 0))
+
+    async def backfill(self, start: float, end: float, everyone: bool = False) -> int:
         """Fill [start, end) (unix s) with finished streams from the platforms' own lists; returns how
         many sessions were added. The same person on two platforms within BACKFILL_MERGE (or
         overlapping) = one multistream session. Anything that overlaps a session the bot already has
@@ -217,6 +250,8 @@ class Watcher:
         for s in self.store.sessions_between(start - 86400, end):
             known.setdefault(s["person_id"], []).append((float(s["started_at"]), float(s["ended_at"] or now)))
         added = 0
+        done_key = f"yt_backfill.{int(start)}"      # YouTube look-ups already made for these days
+        done = self.store.get(done_key, {}) or {}
         for person in self.store.people():
             found: List[Dict[str, Any]] = []
             for a in person.get("accounts") or []:
@@ -224,6 +259,10 @@ class Watcher:
                 if not a.get("platform_id") or c is None or not getattr(c, "ready", True) \
                         or not hasattr(c, "past_streams"):
                     continue
+                if a["platform"] == "youtube":
+                    if not everyone and not self._youtube_due(person["id"], start, end, done):
+                        continue            # quiet in these days, or already looked up since: no quota spent
+                    done[str(person["id"])] = now
                 try:
                     for v in await c.past_streams(a["platform_id"], start, end):
                         found.append({**v, "platform": a["platform"]})
@@ -258,6 +297,7 @@ class Watcher:
                                          source="vod")
                 mine.append((m["started_at"], m["ended_at"]))
                 added += 1
+        self.store.put(done_key, done)
         if added:
             log.info("Filled in %d past stream(s) from the platforms", added)
         return added
@@ -343,6 +383,20 @@ class Watcher:
         return True
 
     # ── reading (/live, /schedule, /status) ────────────────────────────
+    def owner_live(self) -> Optional[bool]:
+        """Is the streamer (people marked owner) live anywhere, as this watcher sees it? True / False,
+        or None when it can't say (no owner followed, or no checker has answered for them in the last
+        10 minutes). flavrbot/core_link.py uses it so Core going quiet after a stream isn't an alarm."""
+        owners = [p for p in self.store.people() if p.get("is_owner") and p.get("accounts")]
+        if not owners:
+            return None
+        if any(self.live_on(p) for p in owners):
+            return True
+        if not all(self._all_checked_since(p, self.clock() - 600) for p in owners):
+            return None
+        return False
+
+
     def status(self) -> Dict[str, Any]:
         return {"platforms": {p: {"ready": bool(getattr(c, "ready", True)), "last_check": self.last_check.get(p),
                                   "error": self.errors.get(p, "")} for p, c in self.checkers.items()},

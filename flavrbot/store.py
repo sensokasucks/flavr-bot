@@ -30,6 +30,10 @@ Tables
             id, a Twitch VOD id, or "<channel>@<time>" for a Twitch / Kick channel link), its state
             (waiting / scheduled / live / past), times, title, picture, who posted it and which
             Discord message it came from (so deleting the post drops it).
+  uploads   videos that aren't streams (YouTube videos, Shorts, premieres; Twitch uploads and
+            highlights), one row per video, for the week / weekend reviews' "Also this week" list.
+            kind: "video" / "short" / "premiere" / "highlight". Filled by flavrbot/watcher.py
+            (``record_uploads``) from what the platform checks already fetch.
   alerts    every alert Core sent (raids, subs, gifts, tips) as JSON, for the after-stream recap
             (flavrbot/recap.py). Both are pruned after KEEP_EVENTS_DAYS.
 
@@ -52,6 +56,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 PLATFORMS = ("youtube", "twitch", "kick")      # also the main-platform fallback order
+ACTIVITY_DAYS = 21                         # store.note_activity keeps feed sightings this long (reviews look back 7)
 GROUPS = ("flavr", "friends")             # FlaVR + Friends (Community, flavrbot/promo.py, is the third built-in); more come from flavrbot/groups.py (/group add)
 
 SCHEMA = """
@@ -156,6 +161,20 @@ CREATE TABLE IF NOT EXISTS promo (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS promo_key ON promo(platform, item_key);
 CREATE INDEX IF NOT EXISTS promo_at ON promo(at);
+CREATE TABLE IF NOT EXISTS uploads (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+  platform TEXT NOT NULL,
+  video_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  at REAL NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  url TEXT NOT NULL DEFAULT '',
+  thumb TEXT NOT NULL DEFAULT '',
+  length REAL NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uploads_key ON uploads(platform, video_id);
+CREATE INDEX IF NOT EXISTS uploads_at ON uploads(at);
 CREATE TABLE IF NOT EXISTS manual_schedule (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
@@ -716,3 +735,49 @@ class Store:
         with self._lock:
             return int(self._db.execute("SELECT COUNT(*) FROM promo WHERE author_id=? AND added_at >= ?",
                                         (str(author_id), since)).fetchone()[0])
+
+    # ── uploads (the reviews' "Also this week") ────────────────────────
+    def add_upload(self, person_id: int, platform: str, video_id: str, kind: str, at: float, title: str = "",
+                   url: str = "", thumb: str = "", length: float = 0) -> bool:
+        """Remember one non-stream video (a second sighting updates it: a premiere's time can move).
+        Returns True when it's new."""
+        with self._lock:
+            new = self._db.execute("SELECT 1 FROM uploads WHERE platform=? AND video_id=?", (platform, video_id)).fetchone() is None
+            self._db.execute("INSERT INTO uploads(person_id, platform, video_id, kind, at, title, url, thumb, length) "
+                             "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(platform, video_id) DO UPDATE SET kind=excluded.kind, "
+                             "at=excluded.at, title=excluded.title, url=excluded.url, thumb=excluded.thumb, "
+                             "length=excluded.length", (person_id, platform, video_id, kind, at, title, url, thumb, length))
+            self._db.commit()
+        return new
+
+    def uploads_between(self, a: float, b: float) -> List[Dict[str, Any]]:
+        """Non-stream videos published in [a, b), oldest first, with the person's name."""
+        with self._lock:
+            return [dict(r) for r in self._db.execute(
+                "SELECT u.*, p.name FROM uploads u JOIN people p ON p.id=u.person_id WHERE u.at >= ? AND u.at < ? "
+                "ORDER BY u.at", (a, b))]
+
+    # ── activity (for the reviews' one-time deep check, owner 2026-11-20) ──────
+    # kv "activity": {person id: [unix s, ...]} = when the FREE checks saw a video of theirs appear (each
+    # YouTube channel's RSS feed: uploads, Shorts, premieres and finished streams alike). Kept ACTIVITY_DAYS.
+    def note_activity(self, person_id: int, times: List[float], now: Optional[float] = None) -> None:
+        """Remember when the free checks saw this person post something (flavrbot/watcher.py)."""
+        cutoff = (now or time.time()) - ACTIVITY_DAYS * 86400
+        seen = self.get("activity", {}) or {}
+        old = [float(t) for t in seen.get(str(person_id), [])]
+        seen[str(person_id)] = sorted({t for t in old + [float(t) for t in times] if t >= cutoff})[-100:]
+        self.put("activity", seen)
+
+    def last_activity(self, person_id: int, a: float, b: float) -> float:
+        """The newest sign that this person did something in [a, b) (unix s), 0 = none: a stream the
+        watcher saw, a saved upload, or a feed sighting (note_activity). The reviews deep-check only
+        people with one (Watcher.backfill)."""
+        times = [float(t) for t in (self.get("activity", {}) or {}).get(str(person_id), []) if a <= float(t) < b]
+        with self._lock:
+            row = self._db.execute("SELECT MAX(COALESCE(last_seen, started_at)) AS t FROM sessions "
+                                   "WHERE person_id=? AND started_at<? AND COALESCE(ended_at, last_seen, started_at)>=?",
+                                   (person_id, b, a)).fetchone()
+            up = self._db.execute("SELECT MAX(at) AS t FROM uploads WHERE person_id=? AND at>=? AND at<?",
+                                  (person_id, a, b)).fetchone()
+        times += [float(r["t"]) for r in (row, up) if r and r["t"] is not None]
+        return max(times, default=0.0)

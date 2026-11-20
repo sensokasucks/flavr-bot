@@ -19,7 +19,7 @@ post to X by itself (X's API needs a paid plan), so it DMs the owner a package t
      formatted text to paste into the Article editor, plus the title and the picture for the cover.
 
 Who calls it: flavrbot/calendar_post.py ``CalendarPoster.share`` (after the Sunday post and the
-Saturday recap, when the /pings switch "share" is on, held until quiet hours end) and /calendar
+Friday / Monday review, when the /pings switch "share" is on, held until quiet hours end) and /calendar
 share in flavrbot/bot.py.
 """
 
@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 from . import groups
-from .calendar import DAY_NAMES, Tile, Week
+from .calendar import DAY_NAMES, UPLOAD_ICONS, UPLOAD_NAMES, UPLOADS_HEAD, Tile, Week
 
 DISCORD_MAX = 2000          # one Discord message
 X_MAX = 280                 # one X post (weighted: see x_len)
@@ -73,7 +73,13 @@ def _clean(text: str, n: int = 60) -> str:
 
 def _heading(week: Week) -> str:
     # a focus share (flavrbot/focus.py FocusWeek) brings its own: "Today on FlaVR", "This weekend on FlaVR"
-    return getattr(week, "heading", "") or groups.heading(week.group, week.recap)
+    # a review says "week in review" / "weekend in review" (calendar.py REVIEWS label)
+    return getattr(week, "heading", "") or groups.heading(week.group, week.recap, getattr(week, "label", ""))
+
+
+def _uploads(week: Week) -> List[Dict[str, Any]]:
+    """A review's videos / Shorts / premieres / Twitch highlights (Week.uploads; none on other shares)."""
+    return list(getattr(week, "uploads", None) or [])
 
 
 def discord_parts(week: Week) -> List[str]:
@@ -101,6 +107,20 @@ def discord_parts(week: Week) -> List[str]:
                 chunk = []
             chunk.append(row[: DISCORD_MAX - 100])
         blocks.append("\n".join([day[0]] + chunk))
+    ups = _uploads(week)
+    if ups:
+        # a review's uploads after the days, as one more message (cut like a long day)
+        top = f"**{UPLOADS_HEAD}**"
+        chunk = []
+        for u in ups:
+            what = _clean(u.get("title") or UPLOAD_NAMES.get(u["kind"], "video"))
+            row = (f"{UPLOAD_ICONS.get(u['kind'], '🎬')} <t:{int(u['at'])}:d> **{no_tags(u['name'])}** · {what}"
+                   + (f" [watch](<{u['url']}>)" if u.get("url") else ""))
+            if chunk and len("\n".join([top] + chunk + [row])) > DISCORD_MAX - 50:
+                blocks.append("\n".join([top] + chunk))
+                chunk = []
+            chunk.append(row[: DISCORD_MAX - 100])
+        blocks.append("\n".join([top] + chunk))
     if not blocks:
         return [head + "\n" + ("No streams this week." if week.recap else "Nothing on the calendar.")]
     if week.recap:
@@ -400,7 +420,7 @@ def article(week: Week, handles: Dict[int, str] | None = None, tags: str = "", t
                         + f"\n  {name}" + (f" {url}" if url else ""))
         pics = []
         n = len(pictures) + 1
-        name = f"{n:02d}-{DAY_NAMES[i][:3].lower()}.png"
+        name = f"{n:02d}-{week.day_name(i)[:3].lower()}.png"
         pictures.append((n, name, i))
         local = save(i) if save else ""
         if local:
@@ -412,6 +432,21 @@ def article(week: Week, handles: Dict[int, str] | None = None, tags: str = "", t
         parts += [f"<h2>{e(head)}</h2>"] + pics + ["<ul>" + "".join(rows) + "</ul>"]
     if not week.tiles():
         parts.append(f"<p>{'No streams this week.' if week.recap else 'Nothing scheduled yet.'}</p>")
+    ups = _uploads(week)
+    if ups:
+        # a review's uploads after the days: "Short · name" on top, the title as the link under it
+        rows = []
+        text.append(UPLOADS_HEAD)
+        for u in ups:
+            kind = UPLOAD_NAMES.get(u["kind"], "video")
+            name = _article_title(u.get("title") or "") or kind
+            day = datetime.fromtimestamp(float(u["at"]), week.tz)
+            top = f"<b>{e(f'{day:%a} {day:%b} {day.day}')} · {e(no_tags(u['name']))}</b> · {e(kind)}"
+            under = f'<a href="{e(u["url"], quote=True)}">{e(name)}</a>' if u.get("url") else e(name)
+            rows.append(f"<li>{top}<br>{under}</li>")
+            text.append(f"• {day:%a} {day:%b} {day.day} · {no_tags(u['name'])} · {kind}\n  {name}"
+                        + (f" {u['url']}" if u.get("url") else ""))
+        parts += [f"<h2>{e(UPLOADS_HEAD)}</h2>", "<ul>" + "".join(rows) + "</ul>"]
     if tags.strip():
         parts.append(f"<p>{e(tags.strip())}</p>")
         text.append(tags.strip())

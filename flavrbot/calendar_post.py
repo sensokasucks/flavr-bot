@@ -1,32 +1,40 @@
 """
-Keeps each group's weekly calendar post in Discord, plus the Saturday recap and the owner's
-calendar pings. The data is flavrbot/calendar.py, the picture flavrbot/render.py.
+Keeps each group's weekly calendar post in Discord, plus the Friday and Monday reviews and the
+owner's calendar pings. The data is flavrbot/calendar.py, the picture flavrbot/render.py.
 
-The week's rhythm (times in TZ; CALENDAR_PREVIEW_HOUR / CALENDAR_RECAP_HOUR):
+The week's rhythm (times in TZ; CALENDAR_PREVIEW_HOUR, review times with /setup review-times):
   Sunday 10 AM   a NEW post for the new week: the picture + a day-by-day list with links.
                  Before 10 AM on Sunday last week's post stays up (it gets its final edits).
   all week       that post is edited in place whenever the board changes (someone schedules,
                  goes live, ends), checked every minute and right after a go-live / end; while
                  someone is live it is also redrawn every LIVE_REDRAW for a fresh live preview.
-  Saturday 11 PM a separate recap post: every stream the watcher saw this week with real start
-                 and end times, length, VOD links and the LATE NOTICE tag (Discord only).
+  Friday 10 AM   the WEEK review: Monday to Thursday, every stream with real start and end times,
+                 length, VOD links and the LATE NOTICE tag, and the videos / Shorts / premieres
+                 ("Also this week").
+  Monday 10 AM   the WEEKEND review: Friday to Sunday, the same way. (Owner 2026-11-20: weekends
+                 are the busy days and people have time for VODs; this replaced the Saturday 11 PM
+                 recap. The two cover every day once; calendar.py REVIEWS / review_range.)
 A group's posts only start once /setup calendar-channel picks its channel (posted at once, even
 mid-week). If the post is deleted, the next change makes a new one.
 
 Calendar pings (the "calendar" kind in /pings): what changed on the board ("Lulu scheduled Thu
-7 PM", "Pippa went live", "new week posted"), collected for PING_BATCH and sent as one DM with
-the newest FlaVR picture. During quiet hours they wait like other pings (text only).
+7 PM", "Pippa went live", "new week posted"), collected for PING_BATCH and sent as one DM per
+group with THAT group's board ("VTC calendar updated: Mumkey Dee ended" comes with the VTC board;
+fixed 2026-11-20, it used to always attach FlaVR's). During quiet hours they wait like other pings
+(text only).
 
 Saved in the database (kv):
   calendar_channel.<group>  channel id (/setup calendar-channel)
   calendar_post.<group>     {week, channel, message, sig, drawn_at}: the live board post
-  calendar_recap.<group>    the week (ISO date of its Sunday) whose recap was posted
+  calendar_review.<label>.<group>  the first day (ISO date) of the newest review posted
+  review_times              {"week": minutes, "weekend": minutes or None = off} (/setup review-times;
+                            default 10 AM both: REVIEW_DEFAULTS)
   backfill.<week>           when that week (ISO date of its Sunday) was last filled in from the
                             platforms (``ensure_backfill``; the bot only knows what it saw live)
 
 Filling in (``backfill``, set by flavrbot/__main__.py to Watcher.backfill): last week and this week
 once at start-up, a past week the first time someone looks at it (/calendar view, the web page),
-again once a week is over, and right before the Saturday recap. /calendar refresh does it by hand.
+again once a week is over, and right before each review. /calendar refresh does it by hand.
 
 Who calls it: flavrbot/__main__.py builds one and runs ``run()``; the watcher's start / end /
 scheduled callbacks call ``poke()``; flavrbot/bot.py's /calendar and /setup calendar-channel use
@@ -38,7 +46,7 @@ png, name)`` → True/False, ``dm_owner(text, png=None)`` and ``dm_share(message
 Talent channels (flavrbot/talent.py): ``tick`` also keeps each person's own week card and recap.
 Focus posts (flavrbot/focus.py): ``tick`` also keeps the automatic "Today" / "This weekend" posts.
 
-Share (flavrbot/share.py): after the Sunday post and the Saturday recap, when the /pings switch
+Share (flavrbot/share.py): after the Sunday post and each review, when the /pings switch
 "share" is on, the owner gets copy-ready text for other Discords and X (held until quiet hours
 end). /calendar share sends it any time.
 """
@@ -52,7 +60,7 @@ from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-from .calendar import DAY_NAMES, Tile, Week, build_week, changes, week_start
+from .calendar import UPLOAD_ICONS, UPLOAD_NAMES, UPLOADS_HEAD, Tile, Week, build_week, changes, review_range, week_start
 from .share import X_STYLES, article, channel_url, discord_parts, x_posts
 from .render import COVER_H, COVER_W, ImageCache, Screenshotter, cover, day_card, logo_data_url, page
 from . import groups, talent
@@ -65,6 +73,8 @@ TICK = 60.0                     # how often the loop looks (a poke wakes it earl
 DOTS = {"youtube": "▶️", "twitch": "🟣", "kick": "🟢"}
 FIELD_MAX = 1024                # Discord: one embed field's text
 EMBED_MAX = 5600                # Discord: 6000 for a whole embed, minus room for title / footer
+REVIEW_DEFAULTS = {"week": 600, "weekend": 600}    # minutes after midnight: Friday / Monday 10 AM
+REVIEW_WEEKDAY = {"week": 4, "weekend": 0}          # Python weekday the review posts on: Friday, Monday
 
 
 def _safe(text: str, n: int = 60) -> str:
@@ -94,13 +104,21 @@ def line(t: Tile, recap: bool) -> str:
     return f"🗓️ {when} **{t.name}** {dots}" + (f" · {tail}" if tail else "")
 
 
+def upload_line(u: Dict[str, Any]) -> str:
+    """One "Also this week" line: icon, when (each reader's own time zone), who, the linked title."""
+    title = _safe(u.get("title") or UPLOAD_NAMES.get(u["kind"], "video"))
+    tail = f"[{title}]({u['url']})" if u.get("url") else title
+    return f"{UPLOAD_ICONS.get(u['kind'], '🎬')} <t:{int(u['at'])}:d> **{u['name']}** · {tail}"
+
+
 def embed(week: Week) -> Dict[str, Any]:
     """The post's text as plain data (flavrbot/bot.py turns it into a discord.Embed):
     {title, colour, fields: [(name, value)], footer}. Days with nothing are left out; a day too
     long for one field ends with "+N more"."""
     # recap posts keep their old "FlaVR: week in review" wording; previews read "This week in FlaVR" /
     # "This week with Art Pals" (groups.heading, also used by share.py)
-    title = (f"{groups.name(week.group)}: week in review · {week.range_text}" if week.recap
+    title = (f"{groups.heading(week.group, True, week.label)} · {week.range_text}" if week.label
+             else f"{groups.name(week.group)}: week in review · {week.range_text}" if week.recap
              else f"{groups.heading(week.group, False)} · {week.range_text}")
     fields: List[Tuple[str, str]] = []
     total = len(title)
@@ -108,8 +126,8 @@ def embed(week: Week) -> Dict[str, Any]:
     for i, tiles in enumerate(week.days):
         if not tiles:
             continue
-        date = week.start + timedelta(days=i)
-        head = f"{DAY_NAMES[i].title()} {date:%b} {date.day}" + (" · today" if i == today and not week.recap else "")
+        date = week.date_of(i)
+        head = f"{week.day_name(i).title()} {date:%b} {date.day}" + (" · today" if i == today and not week.recap else "")
         lines: List[str] = []
         used = 0
         for n, t in enumerate(tiles):
@@ -122,6 +140,17 @@ def embed(week: Week) -> Dict[str, Any]:
         value = "\n".join(lines)
         total += len(head) + len(value)
         fields.append((head, value))
+    if week.uploads:
+        # a review's videos / Shorts / premieres, after the days ("Also this week")
+        lines, used = [], 0
+        for n, u in enumerate(week.uploads):
+            text = upload_line(u)
+            if used + len(text) + 12 > FIELD_MAX or total + used + len(text) > EMBED_MAX:
+                lines.append(f"+{len(week.uploads) - n} more")
+                break
+            lines.append(text)
+            used += len(text) + 1
+        fields.append((UPLOADS_HEAD, "\n".join(lines)))
     if week.recap:
         foot = f"{week.stream_count} streams · {week.hours_live:.0f} hours live"
     else:
@@ -134,7 +163,7 @@ def embed(week: Week) -> Dict[str, Any]:
 
 class CalendarPoster:
     def __init__(self, store: Store, discord: Any, images: ImageCache, shooter: Optional[Screenshotter],
-                 tz: str = "America/New_York", preview_hour: int = 10, recap_hour: int = 23,
+                 tz: str = "America/New_York", preview_hour: int = 10,
                  ping: Optional[Callable[[], bool]] = None, quiet: Optional[Callable[[], bool]] = None,
                  hold: Optional[Callable[[str], Any]] = None, clock: Callable[[], float] = time.time,
                  backfill: Optional[Callable[[float, float], Awaitable[int]]] = None,
@@ -148,12 +177,11 @@ class CalendarPoster:
         except Exception:
             self.tz = ZoneInfo("America/New_York")
         self.preview_hour = preview_hour    # CALENDAR_PREVIEW_HOUR (Sunday)
-        self.recap_hour = recap_hour        # CALENDAR_RECAP_HOUR (Saturday)
         self.ping_on = ping or (lambda: False)      # Pinger switch "calendar"
         self.quiet = quiet or (lambda: False)       # Pinger.quiet_now
         self.hold = hold                            # Pinger.ping("calendar", text): held during quiet hours
         self.clock = clock
-        self.backfill = backfill                    # Watcher.backfill(start, end) → sessions added
+        self.backfill = backfill                    # Watcher.backfill(start, end, everyone) → sessions added
         self.share_on = share_on or (lambda: False)  # Pinger switch "share"
         self._shares: List[Tuple[Week, Optional[bytes]]] = []    # waiting for quiet hours to end
         # the bot's own web address on the home network ("http://192.168.0.20:3870"), for the X Article
@@ -162,9 +190,9 @@ class CalendarPoster:
         self._poke = asyncio.Event()
         self._lock = asyncio.Lock()
         self._seen: Dict[str, Tuple[str, Dict[str, Tile]]] = {}    # group → (week, {key: tile}) last look
-        self._pending: List[str] = []
+        self._pending: Dict[str, List[str]] = {}      # group → change lines waiting for the next DM
         self._pending_at = 0.0
-        self._last_png: Optional[bytes] = None
+        self._png: Dict[str, bytes] = {}                # group → its newest board picture (for that DM)
         self.errors: Dict[str, str] = {}
 
     # ── outside calls ──────────────────────────────────────────────────
@@ -185,6 +213,28 @@ class CalendarPoster:
 
     def build(self, group: str, start: datetime, recap: bool = False) -> Week:
         return build_week(self.store, group, start, self.clock(), self.tz, recap=recap)
+
+    def review_times(self) -> Dict[str, Optional[int]]:
+        """When the reviews post (minutes after midnight on Friday / Monday; None = not by itself)."""
+        return {**REVIEW_DEFAULTS, **(self.store.get("review_times") or {})}
+
+    def build_review(self, group: str, label: str, now: Optional[float] = None) -> Week:
+        """The newest "week" (Mon-Thu) or "weekend" (Fri-Sun) review of a group (calendar.review_range)."""
+        start, n = review_range(label, self.clock() if now is None else now, self.tz)
+        return build_week(self.store, group, start, self.clock(), self.tz, recap=True, days=n, label=label)
+
+    async def backfill_review(self, label: str) -> None:
+        """Fill in the board weeks a review's days fall in (a weekend review spans two)."""
+        start, n = review_range(label, self.clock(), self.tz)
+        last = start + timedelta(days=n - 1)
+        for w in {week_start(start.timestamp(), self.tz), week_start(last.timestamp(), self.tz)}:
+            await self.ensure_backfill(w, force=True)
+
+    async def review_png(self, group: str, label: str) -> Tuple[Week, Optional[bytes]]:
+        """/calendar view review: (the review, its picture), filled in from the platforms first."""
+        await self.backfill_review(label)
+        week = self.build_review(group, label)
+        return week, await self.png(week)
 
     async def png(self, week: Week) -> Optional[bytes]:
         """The picture, or None when Chromium isn't there / fails (posts go out as text then)."""
@@ -220,10 +270,12 @@ class CalendarPoster:
             log.warning("day picture failed: %s", e)
             return None
 
-    async def ensure_backfill(self, start: datetime, force: bool = False) -> int:
+    async def ensure_backfill(self, start: datetime, force: bool = False, everyone: bool = False) -> int:
         """Fill the week starting ``start`` from the platforms' past streams, unless that was already
         done after the week ended (a week still running is done again once it's over). ``force``:
-        always (start-up, the recap, /calendar refresh). Returns how many streams were added."""
+        always (start-up, before each review, /calendar refresh). ``everyone``: YouTube (quota) for
+        every person, not only the ones active those days (/calendar refresh; Watcher.backfill).
+        Returns how many streams were added."""
         if self.backfill is None:
             return 0
         now = self.clock()
@@ -234,7 +286,7 @@ class CalendarPoster:
         if not force and float(self.store.get(key) or 0) >= min(end, now - 6 * 3600):
             return 0
         try:
-            added = await self.backfill(start.timestamp(), min(end, now))
+            added = await self.backfill(start.timestamp(), min(end, now), everyone)
         except Exception:
             log.exception("filling in past streams failed")
             return 0
@@ -264,7 +316,8 @@ class CalendarPoster:
             # (flavrbot/web.py /calendar/article); share.article builds what that page shows
             title = article(week)["title"]
             off = round((week.start - self.week_of(0)).days / 7)
-            q = f"?group={week.group}" + {1: "&week=next", -1: "&week=last"}.get(off, "")
+            q = f"?group={week.group}" + (f"&review={week.label}" if week.label else
+                                          {1: "&week=next", -1: "&week=last"}.get(off, ""))
             url = f"{self.web_url or 'http://<this PC>:3870'}/calendar/article{q}"
             dc = discord_parts(week)
             note = ("📋 Copy-ready calendar. Long-press (phone) or right-click (PC) a message → Copy Text. "
@@ -292,6 +345,11 @@ class CalendarPoster:
             await self.ensure_backfill(start)
         week = self.build(group, start, recap=offset < 0)
         return await self._send_share(week, await self.png(week), style)
+
+    async def share_review(self, group: str, label: str, style: str = "") -> bool:
+        """/calendar share review: DM the package for the newest week / weekend review now."""
+        week, png = await self.review_png(group, label)
+        return await self._send_share(week, png, style)
 
     async def share_person(self, person: Dict[str, Any], offset: int = 0, user_id: int = 0) -> bool:
         """/me share and /calendar share in a talent channel (flavrbot/talent.py): the package for one
@@ -367,14 +425,20 @@ class CalendarPoster:
         post = self.store.get(f"calendar_post.{group}") or {}
         wday = (local.weekday() + 1) % 7               # 0 = Sunday
 
-        # Saturday night recap (once per week)
-        if wday == 6 and local.hour >= self.recap_hour and self.store.get(f"calendar_recap.{group}") != this_week.date().isoformat():
-            await self.ensure_backfill(this_week, force=True)     # streams missed while the bot was down
-            week = self.build(group, this_week, recap=True)
+        # Friday: the week review (Mon-Thu); Monday: the weekend review (Fri-Sun); once each
+        for label, at in self.review_times().items():
+            if at is None or local.weekday() != REVIEW_WEEKDAY[label] or local.hour * 60 + local.minute < at:
+                continue
+            start, _ = review_range(label, now, self.tz)
+            key = f"calendar_review.{label}.{group}"
+            if self.store.get(key) == start.date().isoformat():
+                continue
+            await self.backfill_review(label)           # streams missed while the bot was down
+            week = self.build_review(group, label)
             png = await self.png(week)
-            if await self.discord.cal_send(channel, embed(week), png, f"recap-{this_week:%Y-%m-%d}.png"):
-                self.store.put(f"calendar_recap.{group}", this_week.date().isoformat())
-                self._note(f"{groups.name(group)} week in review posted", png)
+            if await self.discord.cal_send(channel, embed(week), png, f"{label}-review-{start:%Y-%m-%d}.png"):
+                self.store.put(key, start.date().isoformat())
+                self._note(group, f"{groups.heading(group, True, label)} posted", png)
                 self._share_later(week, png)
 
         # which week the live board shows: a new post for a new week from Sunday PREVIEW_HOUR on
@@ -391,7 +455,7 @@ class CalendarPoster:
                                                           "message": str(msg), "sig": week.signature(), "drawn_at": now})
                 self._seen[group] = (this_week.date().isoformat(), {t.key: t for t in week.tiles()})
                 if new_week_due and posted_week:
-                    self._note(f"New {groups.name(group)} week posted", png)
+                    self._note(group, f"New {groups.name(group)} week posted", png)
                     self._share_later(week, png)
             return
         await self._edit(group, post)
@@ -412,8 +476,8 @@ class CalendarPoster:
                                          f"calendar-{start:%Y-%m-%d}.png")
         if ok:
             self.store.put(f"calendar_post.{group}", {**post, "sig": sig, "drawn_at": now})
-            if png and group == "flavr":
-                self._last_png = png
+            if png:
+                self._png[group] = png
         elif not final:
             # the post (or its channel) is gone: forget it, the next look makes a new one
             self.store.put(f"calendar_post.{group}", {})
@@ -425,29 +489,36 @@ class CalendarPoster:
         self._seen[group] = (week_key, now_tiles)
         if not before or before[0] != week_key:
             return                              # first look since start, or a new week: no diff
-        prefix = "" if group == "flavr" else f"{groups.name(group)}: "
         for text in changes(before[1], now_tiles, self.tz):
-            self._note(prefix + text)
+            self._note(group, text)
 
-    def _note(self, text: str, png: Optional[bytes] = None) -> None:
+    def _note(self, group: str, text: str, png: Optional[bytes] = None) -> None:
+        """One change line for ``group``'s next calendar DM (``png``: a picture that goes with it, e.g. the
+        week in review; else the group's newest board)."""
         if not self.ping_on():
             return
         if not self._pending:
             self._pending_at = self.clock()
-        self._pending.append(text)
+        self._pending.setdefault(group, []).append(text)
         if png:
-            self._last_png = png
+            self._png[group] = png
 
     async def flush_pings(self) -> None:
         """Send the collected calendar changes once the oldest is PING_BATCH old."""
         if not self._pending or self.clock() - self._pending_at < PING_BATCH:
             return
-        text = "🗓️ Calendar updated: " + "; ".join(self._pending)
-        self._pending = []
-        if self.quiet() and self.hold:
-            await self.hold(text)           # held like other pings; sent when quiet hours end
-            return
-        try:
-            await self.discord.dm_owner(text[:1900], self._last_png)
-        except Exception:
-            log.exception("calendar ping failed")
+        pending, self._pending = self._pending, {}
+        for group, lines in pending.items():
+            # one DM per group, with that group's own board ("FlaVR" stays unnamed: it's the main one)
+            label = "" if group == "flavr" else f"{groups.name(group)} "
+            text = f"🗓️ {label}{'calendar' if label else 'Calendar'} updated: " + "; ".join(lines)
+            if self.quiet() and self.hold:
+                await self.hold(text)           # held like other pings; sent when quiet hours end
+                continue
+            png = self._png.get(group)
+            if png is None and self.shooter is not None:
+                png = await self.png(self.build(group, self.week_of(0)))    # no post drawn yet this run
+            try:
+                await self.discord.dm_owner(text[:1900], png)
+            except Exception:
+                log.exception("calendar ping failed")

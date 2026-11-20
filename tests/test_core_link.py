@@ -82,3 +82,29 @@ async def test_snapshot_survives_a_restart():
     await link.handle("snapshot", {"points": [{"name": "Bo", "points": 1}]})
     again = CoreLink(store, "pw")
     assert again.snapshot["points"][0]["name"] == "Bo"
+
+
+async def test_no_alarm_after_a_stream_that_simply_ended():
+    # Sen 2026-11-20: Core was closed before it noticed the stream end; the bot still thought "live"
+    # and pinged "Stream Core stopped answering". Now: the watcher seeing the owner offline everywhere
+    # ends it quietly, and /core done (mark_done) does the same by hand.
+    link, clock, got = make()
+    link.owner_live = lambda: False
+    await link.handle("heartbeat", {"stream": {"state": "live", "live": True}})
+    clock.t += 200
+    await link.check_late()
+    assert got["lost"] == [] and link.stream()["state"] == "offline"
+    # watcher can't tell (None) or sees them live (True): the alarm stays
+    link.owner_live = lambda: None
+    await link.handle("heartbeat", {"stream": {"state": "live", "live": True}})
+    clock.t += 200
+    await link.check_late()
+    assert len(got["lost"]) == 1
+    # /core done: no more alarms, and Core coming back is quiet
+    await link.handle("heartbeat", {"stream": {"state": "live", "live": True}})
+    assert len(got["back"]) == 1
+    assert link.mark_done() is True
+    clock.t += 500
+    await link.check_late()
+    await link.handle("heartbeat", {"stream": {"state": "offline", "live": False}})
+    assert len(got["lost"]) == 1 and len(got["back"]) == 1

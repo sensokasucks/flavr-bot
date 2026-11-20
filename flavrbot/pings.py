@@ -5,14 +5,16 @@ turns each DM into a notification, so no other app is needed.
 Kinds (each can be switched with /pings; the defaults are in KINDS):
   stream   your stream started / ended (from Core, core/stream_state.py)
   drop     every platform went offline mid-stream, and when it's back (URGENT)
-  core     Stream Core stopped answering during a stream, and when it's back (URGENT)
+  core     Stream Core stopped answering during a stream, and when it's back (URGENT). Not when the
+           go-live watcher says you're offline everywhere (Core closed before saying the stream
+           ended); /core done tells the bot the stream is over by hand (flavrbot/core_link.py)
   raid     a raid came in
   money    a big tip / Super Chat (BIG_TIP or more) or a big sub gift (BIG_GIFT subs or more)
   friends  someone the go-live watcher follows went live (sent as one list every 10 minutes)
   calendar the weekly calendar changed: new schedules, go-lives, ends, new week / recap posted
            (collected for 10 minutes, sent with the picture; flavrbot/calendar_post.py)
   share    copy-ready calendar text for other Discords and X, after the Sunday post and the
-           Saturday recap (flavrbot/share.py; waits for the end of quiet hours)
+           Friday / Monday review (flavrbot/share.py; waits for the end of quiet hours)
   growth   the server's joins and leaves last week, Sunday at MOMENTS_HOUR (flavrbot/community.py)
   chat_moments  chat suddenly got much busier during your stream, with the Twitch clip when Core
            made one (flavrbot/recap.py; off by default)

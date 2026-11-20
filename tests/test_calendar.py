@@ -164,6 +164,33 @@ class FakeDiscord:
         self.dms.append(text)
 
 
+async def test_calendar_dm_per_group_with_its_own_board(tmp_path):
+    # Sen 2026-11-20: "VTC: Mumkey Dee ended" came with the FlaVR board. Each group's changes now come
+    # in their own DM, with that group's picture.
+    store, lulu, pip, sen = setup()
+    clock = {"t": ts(2026, 11, 17, 12)}
+    d = FakeDiscord()
+    pics = []
+
+    async def dm(text, png=None):
+        d.dms.append(text)
+        pics.append(png)
+
+    d.dm_owner = dm
+    p = CalendarPoster(store, d, ImageCache(tmp_path), None, ping=lambda: True, clock=lambda: clock["t"])
+    store.put("calendar_channel.flavr", "55")
+    store.put("calendar_channel.friends", "66")
+    await p.tick()
+    p._png = {"flavr": b"FLAVR", "friends": b"FRIENDS"}          # the boards drawn so far
+    store.replace_scheduled(lulu, "youtube", [{"key": "v", "at": ts(2026, 11, 19, 19)}], now=clock["t"])
+    store.replace_scheduled(pip, "youtube", [{"key": "w", "at": ts(2026, 11, 20, 20)}], now=clock["t"])
+    await p.tick()
+    clock["t"] += 11 * 60
+    await p.tick()
+    assert sorted(zip(d.dms, pics)) == [("🗓️ Calendar updated: Lulu scheduled Thu 7 PM", b"FLAVR"),
+                                        ("🗓️ Friends calendar updated: Pippa scheduled Fri 8 PM", b"FRIENDS")]
+
+
 async def test_poster_rhythm(tmp_path):
     store, lulu, pip, sen = setup()
     clock = {"t": ts(2026, 11, 17, 12)}                 # Tuesday noon
@@ -182,15 +209,19 @@ async def test_poster_rhythm(tmp_path):
     clock["t"] += 11 * 60
     await p.tick()
     assert d.dms == ["🗓️ Calendar updated: Lulu scheduled Thu 7 PM"]
-    # Saturday 11 PM: the recap, once
+    # Friday 10 AM: the week review (Mon-Thu), once; the Saturday recap is gone (owner 2026-11-20)
+    clock["t"] = ts(2026, 11, 20, 10, 5)
+    await p.tick()
+    await p.tick()
+    assert [s[1] for s in d.sent].count("FlaVR week in review · Nov 16 – 19") == 1
+    assert d.sent[-1][2] == "week-review-2026-11-16.png"
     clock["t"] = ts(2026, 11, 21, 23, 5)
     await p.tick()
-    await p.tick()
-    assert [s[1] for s in d.sent].count("FlaVR: week in review · Nov 15 – 21") == 1
+    assert not any("Nov 15 – 21" in s[1] and "review" in s[1] for s in d.sent)
     # Sunday 9 AM: still last week's post; 10 AM: a new post for the new week
     clock["t"] = ts(2026, 11, 22, 9)
     await p.tick()
-    assert d.sent[-1][1].startswith("FlaVR: week in review")
+    assert d.sent[-1][1].startswith("FlaVR week in review")
     clock["t"] = ts(2026, 11, 22, 10, 1)
     await p.tick()
     assert d.sent[-1][1] == "This week in FlaVR · Nov 22 – 28"
@@ -202,6 +233,16 @@ async def test_poster_rhythm(tmp_path):
     d.gone = False
     await p.tick()
     assert d.sent[-1][1] == "This week in FlaVR · Nov 22 – 28" and len([s for s in d.sent if "Nov 22" in s[1]]) == 2
+    # Monday 10 AM: the weekend review (Fri-Sun just gone), once
+    clock["t"] = ts(2026, 11, 23, 10, 5)
+    await p.tick()
+    await p.tick()
+    assert [s[1] for s in d.sent].count("FlaVR weekend in review · Nov 20 – 22") == 1
+    # /setup review-times week:off: no Friday post
+    store.put("review_times", {"week": None})
+    clock["t"] = ts(2026, 11, 27, 11)
+    await p.tick()
+    assert not any("Nov 23 – 26" in s[1] for s in d.sent)
 
 
 async def test_find_vod_youtube_and_kick():

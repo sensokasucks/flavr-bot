@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from flavrbot.calendar import build_week
 from flavrbot.calendar_post import CalendarPoster
 from flavrbot.platforms.twitch import Twitch, duration_sec
-from flavrbot.platforms.youtube import YouTube
+from flavrbot.platforms.youtube import DEEP_CHECK, YouTube
 from flavrbot.store import Store
 from flavrbot.watcher import Watcher
 
@@ -47,7 +47,7 @@ def world(yt_rows, tw_rows):
 
 async def test_backfill_fills_an_empty_week_and_merges_multistreams():
     store, ch, w = world([vod(20, 3, "yt1"), vod(72, 2, "yt2")], [vod(20.2, 3.1, "tw1")])
-    assert await w.backfill(A, A + 7 * 86400) == 2
+    assert await w.backfill(A, A + 7 * 86400, everyone=True) == 2
     week = build_week(store, "flavr", SUN, NOW, TZ, recap=True)
     tiles = week.tiles()
     assert len(tiles) == 2
@@ -57,7 +57,24 @@ async def test_backfill_fills_an_empty_week_and_merges_multistreams():
     assert first.end == A + 23.3 * 3600         # the later of the two ends (Twitch 20.2 h + 3.1 h)
     assert not first.late                        # filled-in streams never get LATE NOTICE
     # a second run adds nothing (it overlaps what is now saved)
-    assert await w.backfill(A, A + 7 * 86400) == 0
+    assert await w.backfill(A, A + 7 * 86400, everyone=True) == 0
+
+
+async def test_youtube_is_only_asked_about_active_people_once_per_activity():
+    # owner 2026-11-20: free checks flag who did something; YouTube's costly list only for them, once
+    store, ch, w = world([vod(20, 3, "yt1")], [vod(50, 2, "tw1")])
+    pid = store.people()[0]["id"]
+    assert await w.backfill(A, A + 7 * 86400) == 1            # Twitch (free) still asked; YouTube not
+    assert ch["youtube"].asked == 0 and ch["twitch"].asked == 1
+    store.note_activity(pid, [A + 20 * 3600], now=NOW)        # the RSS feed showed a video those days
+    assert await w.backfill(A, A + 7 * 86400) == 1 and ch["youtube"].asked == 1
+    await w.backfill(A, A + 7 * 86400)                         # nothing new since: not asked again
+    assert ch["youtube"].asked == 1
+    store.note_activity(pid, [NOW - 3600], now=NOW)           # outside those days: still not due
+    await w.backfill(A, A + 7 * 86400)
+    assert ch["youtube"].asked == 1
+    await w.backfill(A, A + 7 * 86400, everyone=True)          # /calendar refresh: everyone
+    assert ch["youtube"].asked == 2
 
 
 async def test_backfill_skips_what_the_watcher_saw_and_streams_still_running():
@@ -67,17 +84,20 @@ async def test_backfill_skips_what_the_watcher_saw_and_streams_still_running():
     # ended 5 minutes ago: may still be live, the watcher owns it
     ch["youtube"].rows["UCamanda"].append({"started_at": NOW - 3600, "ended_at": NOW - 300, "title": "now",
                                            "url": "yt9", "thumb": ""})
-    assert await w.backfill(A, NOW) == 0
+    assert await w.backfill(A, NOW, everyone=True) == 0
     assert [s["title"] for s in store.sessions_between(A, NOW)] == ["seen live"]
 
 
 async def test_ensure_backfill_runs_once_per_finished_week():
     store, ch, w = world([vod(20, 3, "yt1")], [])
     poster = CalendarPoster(store, None, None, None, clock=lambda: NOW, backfill=w.backfill)
+    store.note_activity(store.people()[0]["id"], [A + 20 * 3600], now=NOW)     # active that week
     assert await poster.ensure_backfill(SUN) == 1
     asked = ch["youtube"].asked
     assert await poster.ensure_backfill(SUN) == 0 and ch["youtube"].asked == asked     # not asked again
-    await poster.ensure_backfill(SUN, force=True)                                     # /calendar refresh
+    await poster.ensure_backfill(SUN, force=True)                     # before a review: nothing new, no quota
+    assert ch["youtube"].asked == asked
+    await poster.ensure_backfill(SUN, force=True, everyone=True)      # /calendar refresh
     assert ch["youtube"].asked == asked + 1
 
 
@@ -139,12 +159,14 @@ async def test_youtube_past_streams_uses_real_start_and_end():
 
 async def test_youtube_finds_waiting_rooms_gone_from_the_feed():
     # Amanda's case (2026-11-20): a waiting room made a month ahead fell out of the 15-video RSS feed.
-    # The daily search finds it; after that it's asked about directly until it starts.
+    # The deep check (here: daily) finds it; after that it's asked about directly until it starts.
     cid = "UC" + "a" * 22
     upcoming = {"items": [{"id": "w", "snippet": {"title": "Folk Blues", "liveBroadcastContent": "upcoming"},
                            "liveStreamingDetails": {"scheduledStartTime": "2026-11-22T12:00:00Z"}}]}
-    http = FakeHttp([("/search", {"items": [{"id": {"videoId": "w"}}]}), ("/videos", upcoming)])
+    http = FakeHttp([("/search", {"items": [{"id": {"videoId": "w"}}]}), ("/videos", upcoming),
+                     ("/playlistItems", {"items": []})])     # 50+ newer videos: not in the uploads list either
     y = YouTube(http, "key")
+    y.search_every = DEEP_CHECK["daily"]
 
     async def empty_feed(channel_id):
         return []                                   # the waiting room isn't among the 15 newest
@@ -160,3 +182,27 @@ async def test_youtube_finds_waiting_rooms_gone_from_the_feed():
                                               "liveStreamingDetails": {"actualStartTime": "2026-11-22T12:01:00Z"}}]})
     out = await y.live([{"platform_id": cid}])
     assert out[cid]["video_id"] == "w" and y._upcoming_ids == {}
+
+
+async def test_youtube_uploads_list_finds_old_waiting_rooms_and_deep_check_is_off_by_default():
+    # The cheap safety net: the 50 newest uploads every UPLOADS_EVERY (1 quota unit). No search.list
+    # (100 units) unless the owner turns the deep check on (/setup youtube-check).
+    cid = "UC" + "b" * 22
+    upcoming = {"items": [{"id": "w2", "snippet": {"title": "Premiere night", "liveBroadcastContent": "upcoming"},
+                           "liveStreamingDetails": {"scheduledStartTime": "2026-11-22T12:00:00Z"}},
+                          {"id": "up", "snippet": {"title": "A short", "liveBroadcastContent": "none"}}]}
+    http = FakeHttp([("/playlistItems", {"items": [{"contentDetails": {"videoId": "w2"}},
+                                                   {"contentDetails": {"videoId": "up"}}]}),
+                     ("/videos", upcoming), ("/search", {"items": []})])
+    y = YouTube(http, "key")
+    assert y.search_every == 0
+
+    async def empty_feed(channel_id):
+        return []
+
+    y.feed = empty_feed
+    await y.live([{"platform_id": cid}])
+    assert [u["video_id"] for u in y.upcoming[cid]] == ["w2"] and "up" in y._done
+    await y.live([{"platform_id": cid}])            # the uploads list again only after UPLOADS_EVERY
+    assert sum(1 for url, _ in http.calls if "/playlistItems" in url) == 1
+    assert not any("/search" in url for url, _ in http.calls)

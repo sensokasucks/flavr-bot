@@ -6,7 +6,8 @@ what is public anyway (stream titles and times). Never forward the port on the r
   GET /calendar                  this week's board as a live page (reloads every 5 minutes). Also
                                  the OBS Browser Source: 1600 x 900, ?group=friends for the friends
                                  board (or any /group add group's key or name), ?week=next /
-                                 ?week=last (last week = the recap)
+                                 ?week=last (last week = the old full-week recap), ?review=week (the
+                                 newest Monday-Thursday review) / ?review=weekend (Friday-Sunday)
   GET /calendar.png              the same board as a picture (needs Chromium, like the Discord post)
   GET /calendar.ics              calendar feed (Google Calendar, Apple Calendar, phones: "add by URL"):
                                  this week's and next week's streams, past and scheduled, ?group=
@@ -14,7 +15,8 @@ what is public anyway (stream titles and times). Never forward the port on the r
   GET /calendar/article          the week as an X Article (flavrbot/share.py ``article``): the title,
                                  the formatted text with a Copy button (rich text, so it pastes into
                                  X's Article editor as headings, bold and links) and the picture for
-                                 the cover; ?group= ?week= as above. The share DM links here.
+                                 the cover; ?group= ?week= ?review= as above. The share DM links here.
+                                 A review's article ends with its videos, Shorts and premieres.
                                  Each day has its picture with the streams' VOD links under it.
   GET /calendar/cover.png        the X Article cover: 1500 x 600 (5:2, what X asks for), the board's look
   GET /calendar/day.png?day=0-6  one day as a 16:9 picture (that day's thumbnails in a grid): X
@@ -34,7 +36,7 @@ from typing import List
 
 from aiohttp import web
 
-from .calendar import Tile, Week
+from .calendar import REVIEWS, Tile, Week
 from .calendar_post import CalendarPoster
 from .render import logo_data_url, page
 from .share import article, channel_url
@@ -45,6 +47,12 @@ REFRESH_SEC = 300
 
 def _group(request: web.Request) -> str:
     return groups.find(request.query.get("group", "")) or "flavr"
+
+
+def _review(request: web.Request) -> str:
+    """?review=week / weekend → that label (flavrbot/calendar.py REVIEWS), else ""."""
+    r = request.query.get("review", "").lower()
+    return r if r in REVIEWS else ""
 
 
 def _offset(request: web.Request) -> int:
@@ -84,31 +92,33 @@ def ics(weeks: List[Week], now: float) -> str:
 
 
 def add_routes(app: web.Application, poster: CalendarPoster) -> None:
-    async def board(request: web.Request) -> web.Response:
+    async def _week(request: web.Request):
+        """The week (or review) a request asks for: ?group= ?week= ?review=. A past week or a review
+        is filled in from the platforms first (once)."""
+        label = _review(request)
+        if label:
+            await poster.backfill_review(label)
+            return poster.build_review(_group(request), label)
         off = _offset(request)
         if off < 0:
             await poster.ensure_backfill(poster.week_of(off))     # last week: fill in from the platforms once
-        week = poster.build(_group(request), poster.week_of(off), recap=off < 0)
+        return poster.build(_group(request), poster.week_of(off), recap=off < 0)
+
+    async def board(request: web.Request) -> web.Response:
+        week = await _week(request)
         await poster.images.fetch_all(week)
         img = lambda u: f"/calendar/img/{poster.images.name(u)}" if u and poster.images.path(u).exists() else ""  # noqa: E731
         return web.Response(text=page(week, img, logo=logo_data_url(), refresh=REFRESH_SEC),
                             content_type="text/html", charset="utf-8")
 
     async def picture(request: web.Request) -> web.Response:
-        off = _offset(request)
-        if off < 0:
-            await poster.ensure_backfill(poster.week_of(off))
-        week = poster.build(_group(request), poster.week_of(off), recap=off < 0)
-        png = await poster.png(week)
+        png = await poster.png(await _week(request))
         if not png:
             return web.Response(status=503, text="The picture needs Chromium (see the README).")
         return web.Response(body=png, content_type="image/png", headers={"Cache-Control": "max-age=60"})
 
     async def cover_picture(request: web.Request) -> web.Response:
-        off = _offset(request)
-        if off < 0:
-            await poster.ensure_backfill(poster.week_of(off))
-        png = await poster.cover_png(poster.build(_group(request), poster.week_of(off), recap=off < 0))
+        png = await poster.cover_png(await _week(request))
         if not png:
             return web.Response(status=503, text="The picture needs Chromium (see the README).")
         return web.Response(body=png, content_type="image/png", headers={"Cache-Control": "max-age=60"})
@@ -119,14 +129,8 @@ def add_routes(app: web.Application, poster: CalendarPoster) -> None:
         return web.Response(text=ics(weeks, poster.clock()), content_type="text/calendar", charset="utf-8")
 
     def _query(request: web.Request) -> str:
-        q = "&".join(f"{k}={v}" for k, v in request.query.items() if k in ("group", "week"))
+        q = "&".join(f"{k}={v}" for k, v in request.query.items() if k in ("group", "week", "review"))
         return "?" + q if q else ""
-
-    async def _week(request: web.Request):
-        off = _offset(request)
-        if off < 0:
-            await poster.ensure_backfill(poster.week_of(off))
-        return poster.build(_group(request), poster.week_of(off), recap=off < 0)
 
     async def _article(request: web.Request) -> dict:
         """share.article for ?group= ?week=, with one picture per day (/calendar/day.png)."""

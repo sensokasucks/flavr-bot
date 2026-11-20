@@ -16,6 +16,15 @@ their real start and end times. Finished livestreams are in the uploads list as 
 streamer keeps the VOD public.
 
 Videos already known to be over are remembered (``_done``) and never asked about again.
+
+Waiting rooms made long ahead (Sen 2026-11-20: Amanda's Nov 22 stream, made Oct 22, never showed):
+the RSS feed lists only the 15 newest videos, so a waiting room drops out of it once the channel
+posts 15 more. Two things catch those:
+  * every upcoming stream found is remembered (``_upcoming_ids``) and asked about directly until it
+    goes live, ends or is gone, even after it leaves the feed;
+  * once every SEARCH_EVERY per channel, one Data API ``search.list`` (eventType=upcoming, 100 quota
+    units) asks YouTube for that channel's scheduled streams, wherever they are in its list. About
+    15 channels x 100 = 1,500 of the 10,000 free daily units. It runs at start-up too (memory only).
 """
 
 from __future__ import annotations
@@ -40,6 +49,7 @@ CHANNEL_ID = re.compile(r"^UC[\w-]{22}$")
 # Only feed videos this new are asked about. Waiting rooms are often made weeks ahead, so this
 # is long; every video is asked about once and remembered (_done) once it's over or an upload.
 FRESH_DAYS = 45
+SEARCH_EVERY = 24 * 3600.0      # per channel: one search.list for scheduled streams (100 quota units)
 
 
 def parse_feed(xml_text: str) -> List[Dict[str, Any]]:
@@ -68,6 +78,8 @@ class YouTube:
         self.api_key = api_key
         self._done: set[str] = set()          # videos known to be over or plain uploads
         self.upcoming: Dict[str, List[Dict[str, Any]]] = {}   # channel id → scheduled streams (for /schedule)
+        self._upcoming_ids: Dict[str, str] = {}   # video id → channel id: waiting rooms seen, asked until they start
+        self._searched: Dict[str, float] = {}     # channel id → last search.list for its upcoming streams
 
     @property
     def ready(self) -> bool:
@@ -110,12 +122,22 @@ class YouTube:
                 return []
             return parse_feed(await r.text())
 
+    async def search_upcoming(self, channel_id: str) -> List[str]:
+        """The channel's scheduled streams straight from YouTube's search (100 quota units): video ids."""
+        data = await self._api("/search", {"part": "id", "channelId": channel_id, "eventType": "upcoming",
+                                           "type": "video", "maxResults": "25"})
+        return [str((i.get("id") or {}).get("videoId") or "") for i in data.get("items") or []
+                if (i.get("id") or {}).get("videoId")]
+
     async def live(self, accounts: List[Dict[str, Any]]) -> Dict[str, Live]:
-        """RSS for every channel, then one videos.list for the fresh, not-yet-finished videos."""
+        """RSS for every channel (plus a daily search, and the waiting rooms already found), then one
+        videos.list per 50 of the fresh, not-yet-finished videos."""
         if not self.api_key:
             return {}
         owner_of: Dict[str, str] = {}
-        cutoff = time.time() - FRESH_DAYS * 86400
+        now = time.time()
+        cutoff = now - FRESH_DAYS * 86400
+        followed = {a.get("platform_id") or "" for a in accounts} - {""}
         for a in accounts:
             cid = a.get("platform_id") or ""
             if not cid:
@@ -126,16 +148,35 @@ class YouTube:
                         owner_of[v["video_id"]] = cid
             except aiohttp.ClientError as e:
                 log.info("YouTube feed for %s failed: %s", cid, e)
+            if now - self._searched.get(cid, 0.0) >= SEARCH_EVERY:
+                self._searched[cid] = now           # also on failure: a quota problem shouldn't retry every check
+                try:
+                    for vid in await self.search_upcoming(cid):
+                        if vid not in self._done:
+                            owner_of.setdefault(vid, cid)
+                except (aiohttp.ClientError, RuntimeError) as e:
+                    log.info("YouTube search for %s's scheduled streams failed: %s", cid, e)
+        for vid, cid in list(self._upcoming_ids.items()):
+            if cid in followed:
+                owner_of.setdefault(vid, cid)       # a waiting room found earlier, maybe gone from the feed
+            else:
+                del self._upcoming_ids[vid]         # nobody follows that channel any more
         out: Dict[str, Live] = {}
         upcoming: Dict[str, List[Dict[str, Any]]] = {}
         for part in chunks(list(owner_of), 50):
             data = await self._api("/videos", {"part": "snippet,liveStreamingDetails", "id": ",".join(part)})
+            answered = {str(v.get("id") or "") for v in data.get("items") or []}
+            for vid in part:
+                if vid not in answered:
+                    self._upcoming_ids.pop(vid, None)   # deleted or made private
             for v in data.get("items") or []:
                 vid = str(v.get("id") or "")
                 sn = v.get("snippet") or {}
                 ld = v.get("liveStreamingDetails") or {}
                 state = sn.get("liveBroadcastContent")
                 cid = owner_of.get(vid, "")
+                if state != "upcoming":
+                    self._upcoming_ids.pop(vid, None)
                 if state == "live":
                     out[cid] = {"title": str(sn.get("title") or ""), "game": "",
                                 "viewers": int(ld.get("concurrentViewers") or 0),
@@ -144,6 +185,7 @@ class YouTube:
                                 "thumb": f"https://i.ytimg.com/vi/{vid}/hqdefault_live.jpg?t={int(time.time() // 300)}",
                                 "video_id": vid}
                 elif state == "upcoming":
+                    self._upcoming_ids[vid] = cid
                     upcoming.setdefault(cid, []).append({
                         "title": str(sn.get("title") or ""), "at": iso_ts(str(ld.get("scheduledStartTime") or "")),
                         "url": f"https://www.youtube.com/watch?v={vid}", "platform": "youtube", "video_id": vid,

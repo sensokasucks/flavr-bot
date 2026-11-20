@@ -11,7 +11,8 @@ with their VOD, who's live, what's scheduled), cut down to the chosen days, as
 
 Which days (``pick_days``, local time in TZ):
   today / tomorrow     that date
-  weekend              Saturday + Sunday: the coming weekend Monday to Friday, this one on Sat/Sun
+  weekend              Friday + Saturday + Sunday (Sen 2026-11-20: weekends include Friday): the
+                       coming one Monday to Thursday, this one Friday to Sunday
                        (the board's week runs Sunday to Saturday, so the two days can sit in two weeks)
   sunday ... saturday  the next one, today included
 
@@ -98,11 +99,9 @@ def pick_days(when: str, now: float, tz: ZoneInfo) -> Tuple[str, List[date]]:
     if when == "tomorrow":
         return "Tomorrow", [today + timedelta(days=1)]
     if when == "weekend":
-        if wday == 0:                                       # Sunday: this weekend, yesterday + today
-            sat = today - timedelta(days=1)
-        else:
-            sat = today + timedelta(days=6 - wday)          # Saturday of this week (today on Saturday)
-        return "This weekend", [sat, sat + timedelta(days=1)]
+        # Friday of this weekend: the coming one Mon-Thu (wday 1-4), today on Friday, 1 / 2 days back on Sat / Sun
+        fri = today + timedelta(days=5 - wday) if 1 <= wday <= 5 else today - timedelta(days=1 if wday == 6 else 2)
+        return "This weekend", [fri + timedelta(days=k) for k in range(3)]
     if when in WEEKDAYS:
         d = today + timedelta(days=(WEEKDAYS.index(when) - wday) % 7)
         return ("Today" if d == today else when.title()), [d]
@@ -124,7 +123,7 @@ def build(poster: Any, group: str, label: str, dates: List[date], person_id: int
 
 
 def title(f: Focus, who: str = "") -> str:
-    """"Today on FlaVR · Thu Nov 19", "This weekend with Friends · Nov 21–22", "Lulu today · ..."."""
+    """"Today on FlaVR · Thu Nov 19", "This weekend with Friends · Nov 20–22", "Lulu today · ..."."""
     if who:
         return f"{who}: {f.label.lower() if f.label != 'This weekend' else 'this weekend'} · {f.date_text}"
     joiner = "on" if f.group == "flavr" else "with"

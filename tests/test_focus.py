@@ -13,10 +13,12 @@ def test_which_days():
     thu = ts(2026, 11, 19, 17)                       # Thursday
     assert focus.pick_days("today", thu, TZ) == ("Today", [date(2026, 11, 19)])
     assert focus.pick_days("tomorrow", thu, TZ) == ("Tomorrow", [date(2026, 11, 20)])
-    # the coming weekend; Saturday and Sunday sit in two different board weeks
-    assert focus.pick_days("weekend", thu, TZ) == ("This weekend", [date(2026, 11, 21), date(2026, 11, 22)])
-    assert focus.pick_days("weekend", ts(2026, 11, 21, 9), TZ)[1] == [date(2026, 11, 21), date(2026, 11, 22)]
-    assert focus.pick_days("weekend", ts(2026, 11, 22, 9), TZ)[1] == [date(2026, 11, 21), date(2026, 11, 22)]
+    # the coming weekend, Friday to Sunday; Sunday sits in the next board week
+    wknd = [date(2026, 11, 20), date(2026, 11, 21), date(2026, 11, 22)]
+    assert focus.pick_days("weekend", thu, TZ) == ("This weekend", wknd)
+    assert focus.pick_days("weekend", ts(2026, 11, 16, 9), TZ)[1] == wknd          # Monday
+    for d in (20, 21, 22):                                                          # during the weekend: this one
+        assert focus.pick_days("weekend", ts(2026, 11, d, 9), TZ)[1] == wknd
     assert focus.pick_days("monday", thu, TZ) == ("Monday", [date(2026, 11, 23)])
     assert focus.pick_days("thursday", thu, TZ) == ("Today", [date(2026, 11, 19)])
 
@@ -28,15 +30,15 @@ def test_focus_builds_from_the_board_across_weeks(tmp_path):
     store.add_manual(sen, 0, 15 * 60, "Sun stream")          # Sunday 3 PM (next board week)
     store.add_manual(sen, 4, 20 * 60, "Thu stream")
     f = focus.build(p, "flavr", *focus.pick_days("weekend", p.clock(), TZ))
-    assert [[t.name for t in d] for d in f.days] == [["Lulu"], ["Sensoka"]]
+    assert [[t.name for t in d] for d in f.days] == [[], ["Lulu"], ["Sensoka"]]
     data = focus.embed(f)
-    assert data["title"] == "This weekend on FlaVR · Nov 21–22"
-    assert [n for n, _ in data["fields"]] == ["Saturday Nov 21", "Sunday Nov 22"]
-    assert "Sat stream" in data["fields"][0][1] and "Thu stream" not in str(data)
+    assert data["title"] == "This weekend on FlaVR · Nov 20–22"
+    assert [n for n, _ in data["fields"]] == ["Friday Nov 20", "Saturday Nov 21", "Sunday Nov 22"]
+    assert "Sat stream" in data["fields"][1][1] and "Thu stream" not in str(data)
     # a talent channel: only that person
     only = focus.build(p, "flavr", "This weekend", f.dates, person_id=lulu)
     assert only.tiles()[0].name == "Lulu" and len(only.tiles()) == 1
-    assert focus.embed(only, "Lulu")["title"] == "Lulu: this weekend · Nov 21–22"
+    assert focus.embed(only, "Lulu")["title"] == "Lulu: this weekend · Nov 20–22"
     # an empty day says so
     empty = focus.build(p, "flavr", *focus.pick_days("monday", p.clock(), TZ))
     assert focus.embed(empty)["description"] == "Nothing on the calendar yet." and focus.embed(empty)["fields"] == []
@@ -74,7 +76,7 @@ async def test_automatic_day_posts(tmp_path):
     # Friday: no Today post (nothing on), but the weekend one
     clock["t"] = ts(2026, 11, 20, 10, 1)
     await p.tick()
-    assert d.sent[1:] == [("77", "This weekend on FlaVR · Nov 21–22", "weekend-2026-11-21.png")]
+    assert d.sent[1:] == [("77", "This weekend on FlaVR · Nov 20–22", "weekend-2026-11-20.png")]
     await p.tick()
     assert len(d.sent) == 2
 
@@ -97,14 +99,14 @@ async def test_tomorrow_preview_weekend_day_and_share(tmp_path):
                                   "weekend_day": 4})
     await p.tick()
     assert d.sent == [("77", "Tomorrow on FlaVR · Fri Nov 20", "tomorrow-2026-11-20.png"),
-                      ("77", "This weekend on FlaVR · Nov 21–22", "weekend-2026-11-21.png")]
+                      ("77", "This weekend on FlaVR · Nov 20–22", "weekend-2026-11-20.png")]
     # /pings share on: the copy-ready texts follow each automatic post
     assert len(shared) == 2 and "Tomorrow on FlaVR" in shared[0][1] and "Fri stream" in "".join(shared[0])
     assert "This weekend on FlaVR" in shared[1][1] and "Sat stream" in "".join(shared[1])
     # /calendar share when:weekend, X Article style falls back to the post + links reply
     assert await focus.share(p, "flavr", "weekend", "article")
     texts = shared[-1]
-    assert "Nov 21–22" in texts[1] and not any("Article" in x for x in texts)
+    assert "Nov 20–22" in texts[1] and not any("Article" in x for x in texts)
     # real weekdays, not positions in a week (Saturday is the focus's first day, a week's Sunday slot)
-    assert "**Sat Nov 21**" in texts[1] and any("SAT · NOV 21" in x for x in texts)
+    assert any("**Sat Nov 21**" in x for x in texts) and any("SAT · NOV 21" in x for x in texts)
     assert not any("Sun Nov 21" in x or "SUN · NOV 21" in x for x in texts)

@@ -47,6 +47,11 @@ up to an hour to show the first time):
     /live-mode add|remove channel | slowmode seconds | voice [channel] | show   while you're live
     /setup starboard channel [emoji] [count]     /setup moments channel [role]     /birthday set|remove
     /growth                   joins and leaves, the last 4 weeks
+  Community calendar (flavrbot/promo.py): streams members add from their self-promo posts
+    message menu (long-press / right-click a post → Apps) "Add to community calendar" and
+        "Remove from community calendar": your own posts with an allowed role; moderators any post
+    /community schedule link [when] | list [week] | remove number      (the same, typed)
+    /community roles add|remove|list role | report-channel channel   (owner or Manage Server)
   Talent channels (flavrbot/talent.py)
     /talent channel name [channel] | link name [user] | options name [group_channel] [own_channel] | list
                         someone's own channel: go-live cards there too, a pinned week card, their recap;
@@ -84,7 +89,7 @@ from .config import Settings
 from .server_care import MAX_ROLE_BUTTONS, ServerCare, missing
 from .community import Community, missing_more
 from . import community as community_cmds
-from . import said, talent
+from . import promo, said, talent
 from .core_link import CoreLink
 from .pings import KINDS, Pinger, length
 from .share import X_STYLES
@@ -178,6 +183,8 @@ class FlavrBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
         # the weekly calendar (flavrbot/calendar_post.py); set by flavrbot/__main__.py
         self.calendar: Any = None
+        # the community calendar (flavrbot/promo.py Promo); set by flavrbot/__main__.py
+        self.promo: Any = None
         # set once Discord says we're in; the go-live watcher waits for it so its first posts don't get lost
         self.ready_event = asyncio.Event()
         # role buttons, mod log, scam links, backups (settings: SCAM_TIMEOUT_MIN, BACKUP_HOUR, BACKUP_KEEP)
@@ -293,6 +300,8 @@ class FlavrBot(discord.Client):
 
     async def on_raw_message_delete(self, p: discord.RawMessageDeleteEvent) -> None:
         await self.care.on_raw_message_delete(p)
+        if self.promo is not None:
+            self.promo.post_deleted(str(p.message_id))     # a deleted self-promo post leaves the community calendar
 
     async def on_member_join(self, member: discord.Member) -> None:
         await self.care.on_member_join(member)
@@ -786,7 +795,7 @@ class FlavrBot(discord.Client):
                 return
             shown = groups.name(g)
             if not groups.remove(g):
-                await inter.response.send_message("FlaVR and Friends stay (you can rename them with /group edit).",
+                await inter.response.send_message("FlaVR, Friends and Community stay (you can rename them with /group edit).",
                                                   ephemeral=True)
                 return
             moved = bot.store.move_group(g, "friends")
@@ -1218,3 +1227,4 @@ class FlavrBot(discord.Client):
         community_cmds.register(tree, bot, managers_only)
         talent.register(tree, bot, managers_only, day_choices, parse_time)     # /talent and /me
         said.register(tree, bot)                    # /said chat search (flavrbot/said.py)
+        promo.register(tree, bot, managers_only)    # community calendar: message menu + /community (flavrbot/promo.py)

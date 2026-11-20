@@ -22,12 +22,12 @@ def fresh():
 
 def test_defaults_and_add():
     fresh()
-    assert groups.keys() == ["flavr", "friends"]
+    assert groups.keys() == ["flavr", "friends", "community"]
     assert groups.find("") == "flavr" and groups.find("FRIENDS") == "friends" and groups.find("nope") is None
     assert groups.add("Art Pals", "#ff8800") == "art-pals"
     assert groups.find("art pals") == "art-pals" and groups.find("Art-Pals") == "art-pals"
     assert groups.add("art pals") == "" and groups.add("flavr") == "" and groups.add("!!!") == ""   # taken / empty
-    assert groups.keys() == ["flavr", "friends", "art-pals"]
+    assert groups.keys() == ["flavr", "friends", "community", "art-pals"]
     assert groups.colour("art-pals") == "#ff8800" and groups.colour_int("art-pals") == 0xff8800
     assert groups.parse_colour("f80") == "#ff8800" and groups.parse_colour("orange") is None
 
@@ -42,7 +42,7 @@ def test_edit_and_remove():
     a = store.add_person("Lulu", "art-pals")
     store.add_person("Raimi", "art-pals")
     assert groups.remove("art-pals") and store.move_group("art-pals", "friends") == 2
-    assert [p["grp"] for p in store.people()] == ["friends", "friends"] and groups.keys() == ["flavr", "friends"]
+    assert [p["grp"] for p in store.people()] == ["friends", "friends"] and groups.keys() == ["flavr", "friends", "community"]
     store.set_group(a, "flavr")
     assert next(p for p in store.people() if p["id"] == a)["grp"] == "flavr"
     store.put("live_channel.x", "1")

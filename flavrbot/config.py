@@ -95,6 +95,9 @@ class Settings:
     recap_delay_min: int = 3
     ollama_url: str = ""                # e.g. http://127.0.0.1:11434
     ollama_model: str = "llama3.2:3b"
+    # Community calendar (flavrbot/promo.py): streams people add from their self-promo posts
+    promo_weekly_limit: int = 7         # posts one person can add in 7 days (mods have no limit)
+    promo_wait_hours: int = 6           # a channel link added while offline (no time given) waits this long to go live
     # Storage
     data_dir: str = "/data"
     extra: Dict[str, str] = field(default_factory=dict)
@@ -149,6 +152,8 @@ def load(env: Optional[Mapping[str, str]] = None) -> Settings:
         recap_delay_min=max(1, min(60, _int(env, "RECAP_DELAY_MIN", 3))),
         ollama_url=g("OLLAMA_URL").rstrip("/"),
         ollama_model=g("OLLAMA_MODEL", "llama3.2:3b"),
+        promo_weekly_limit=max(1, _int(env, "PROMO_WEEKLY_LIMIT", 7)),
+        promo_wait_hours=max(1, min(48, _int(env, "PROMO_WAIT_HOURS", 6))),
         data_dir=g("DATA_DIR", "/data"),
     )
 

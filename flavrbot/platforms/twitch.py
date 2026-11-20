@@ -10,6 +10,7 @@ Calls (all documented Helix endpoints):
                                             every 6 h: flavrbot/watcher.py refresh_schedules)
   GET  helix/games?id=a&id=b                box art of the scheduled games (calendar tiles)
   GET  helix/videos?user_id=&type=archive   the newest VOD after a stream ends
+  GET  helix/videos?id=                     one VOD a member posted (community calendar, flavrbot/promo.py)
 
 Rate: Helix allows 800 points a minute for an app; the watcher uses one streams call per 100
 people every TWITCH_EVERY_SEC (default 2 minutes).
@@ -181,3 +182,24 @@ class Twitch:
                         # a VOD still being made has a placeholder picture with no size in it
                         "thumb": thumb.replace("%{width}", "640").replace("%{height}", "360") if "%{width}" in thumb else ""})
         return out
+
+    async def video(self, video_id: str) -> Optional[Dict[str, Any]]:
+        """One VOD by its id (twitch.tv/videos/<id>), for a community post (flavrbot/promo.py). Helix
+        /videos?id=, 1 call. → {type ("archive" = a past broadcast), started_at, ended_at, title, url,
+        thumb, user_id, login, display} or None when Twitch doesn't know it (deleted, private)."""
+        try:
+            data = await self._get("/videos", [("id", video_id)])
+        except RuntimeError:
+            return None
+        rows = data.get("data") or []
+        if not rows:
+            return None
+        v = rows[0]
+        start = iso_ts(str(v.get("created_at") or ""))
+        thumb = str(v.get("thumbnail_url") or "")
+        return {"type": str(v.get("type") or ""), "started_at": start,
+                "ended_at": (start or 0) + duration_sec(str(v.get("duration") or "")),
+                "title": str(v.get("title") or ""), "url": str(v.get("url") or ""),
+                "thumb": thumb.replace("%{width}", "640").replace("%{height}", "360") if "%{width}" in thumb else "",
+                "user_id": str(v.get("user_id") or ""), "login": str(v.get("user_login") or ""),
+                "display": str(v.get("user_name") or "")}

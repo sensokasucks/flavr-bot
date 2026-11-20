@@ -7,6 +7,8 @@ Where each tile comes from
   past       a stream the watcher saw (sessions table) that has ended; picture = its VOD picture
              (Twitch VOD thumbnail / YouTube hqdefault), else the thumbnail seen while live
   live       a stream still open in the sessions table; picture = the live preview
+  community  group "community" also gets the streams members added from their posts
+             (flavrbot/promo.py ``tiles``), on top of any people put in that group
   scheduled  a Twitch schedule segment or a YouTube waiting room (scheduled table), or a weekly
              time set by hand (/friend schedule, manual_schedule table); picture = the game's box
              art or YouTube's own thumbnail, else the person's profile picture
@@ -211,6 +213,10 @@ def build_week(store: Store, group: str, start: datetime, now: float, tz: ZoneIn
                                thumb=x.get("thumb") or "", avatar=avatar.get(x["person_id"], ""),
                                platforms=[plat] if plat else [], links={plat: x.get("url") or ""} if plat else {}))
         tiles += merged
+
+    from . import promo                 # late import: promo.py imports Tile and the windows from here
+    if group == promo.GROUP:
+        tiles += promo.tiles(store, a, b, now, recap)
 
     days: List[List[Tile]] = [[] for _ in range(7)]
     for t in tiles:

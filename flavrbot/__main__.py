@@ -4,7 +4,8 @@ Start FlaVR Bot: ``python -m flavrbot`` (the Docker image's command).
 Builds, in order: settings (environment), the database, the Stream Core link (web listener),
 phone pings, the after-stream recap (flavrbot/recap.py), the go-live watcher with its platform checkers, the Discord client (after reading which
 privileged intents the developer portal allows) with server care, then the weekly
-calendar (its posts, and its pages on the same web listener), and runs them all on one event
+calendar (its posts, and its pages on the same web listener) and the community calendar
+(flavrbot/promo.py, streams members add from their posts), and runs them all on one event
 loop until the container stops.
 """
 
@@ -24,6 +25,7 @@ from .bot import FlavrBot
 from .calendar_post import CalendarPoster
 from .core_link import CoreLink
 from .pings import Pinger
+from .promo import Promo
 from .recap import Recapper
 from .platforms.kick import Kick
 from .platforms.twitch import Twitch
@@ -102,6 +104,10 @@ async def main() -> int:
                                 hold=lambda text: pinger.ping("calendar", text), backfill=watcher.backfill,
                                 share_on=lambda: pinger.switches().get("share", False))
         bot.calendar = poster
+        # community calendar (flavrbot/promo.py): streams members add from their posts, followed with the
+        # same platform clients; settings PROMO_WEEKLY_LIMIT, PROMO_WAIT_HOURS
+        bot.promo = Promo(store, checkers, ZoneInfo(s.timezone), weekly_limit=s.promo_weekly_limit,
+                          wait_hours=s.promo_wait_hours, poke=poster.poke)
         poster.web_url = s.web_address or web_address(s.listen_port)    # the X Article link in share DMs
         link.extra_routes.append(lambda app: add_routes(app, poster))
 
@@ -151,7 +157,8 @@ async def main() -> int:
                  asyncio.create_task(after_ready(watcher.run_schedules), name="schedules"),
                  asyncio.create_task(after_ready(bot.care.run_backups), name="backups"),
                  asyncio.create_task(after_ready(bot.community.run_daily), name="moments"),
-                 asyncio.create_task(after_ready(recapper.run), name="recap")]
+                 asyncio.create_task(after_ready(recapper.run), name="recap"),
+                 asyncio.create_task(after_ready(bot.promo.run), name="community")]
         for platform, checker in checkers.items():
             if checker.ready:
                 tasks.append(asyncio.create_task(watch(platform), name=f"watch-{platform}"))

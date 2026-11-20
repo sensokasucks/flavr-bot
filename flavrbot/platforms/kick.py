@@ -6,7 +6,9 @@ KICK_CLIENT_SECRET from kick.com → Settings → Developer → Create app; no u
   GET  api.kick.com/public/v1/channels?slug=a&slug=b up to 50 per call: live or not, title,
                                                      category, viewers, start time, thumbnail
 
-Kick has no schedule or VOD API, so Kick streams show on /live but not on /schedule.
+Kick has no schedule or VOD API, so Kick streams show on /live but not on /schedule. The community
+calendar (flavrbot/promo.py) uses ``channels`` too, and links a finished Kick stream to the
+channel's videos page (kick.com/<name>/videos, a plain link, no API call).
 """
 
 from __future__ import annotations

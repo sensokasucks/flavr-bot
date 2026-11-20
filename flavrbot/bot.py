@@ -849,7 +849,7 @@ class FlavrBot(discord.Client):
                                       ephemeral=True, allowed_mentions=NO_PINGS)
 
         focus_choices = [app_commands.Choice(name=n, value=v) for n, v in
-                         [("Today", "today"), ("Tomorrow", "tomorrow"), ("This weekend (Sat + Sun)", "weekend")] +
+                         [("Today", "today"), ("Tomorrow", "tomorrow"), ("This weekend (Fri to Sun)", "weekend")] +
                          [(d.title(), d) for d in focus.WEEKDAYS]]
 
         @calendar.command(name="focus", description="Just one day or the weekend: today, tomorrow, a weekday")

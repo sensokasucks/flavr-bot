@@ -135,3 +135,28 @@ async def test_youtube_past_streams_uses_real_start_and_end():
     assert [r["url"] for r in rows] == ["https://www.youtube.com/watch?v=a"]
     assert rows[0]["ended_at"] - rows[0]["started_at"] == 3 * 3600
     assert http.calls[0][1]["playlistId"] == "UU" + "x" * 22
+
+
+async def test_youtube_finds_waiting_rooms_gone_from_the_feed():
+    # Amanda's case (2026-11-20): a waiting room made a month ahead fell out of the 15-video RSS feed.
+    # The daily search finds it; after that it's asked about directly until it starts.
+    cid = "UC" + "a" * 22
+    upcoming = {"items": [{"id": "w", "snippet": {"title": "Folk Blues", "liveBroadcastContent": "upcoming"},
+                           "liveStreamingDetails": {"scheduledStartTime": "2026-11-22T12:00:00Z"}}]}
+    http = FakeHttp([("/search", {"items": [{"id": {"videoId": "w"}}]}), ("/videos", upcoming)])
+    y = YouTube(http, "key")
+
+    async def empty_feed(channel_id):
+        return []                                   # the waiting room isn't among the 15 newest
+
+    y.feed = empty_feed
+    await y.live([{"platform_id": cid}])
+    assert [u["title"] for u in y.upcoming[cid]] == ["Folk Blues"]
+    await y.live([{"platform_id": cid}])            # no second search within a day, still found
+    assert sum(1 for url, _ in http.calls if "/search" in url) == 1
+    assert [u["video_id"] for u in y.upcoming[cid]] == ["w"]
+    # it starts: live, and no longer kept as a waiting room
+    http.answers[1] = ("/videos", {"items": [{"id": "w", "snippet": {"title": "Folk Blues", "liveBroadcastContent": "live"},
+                                              "liveStreamingDetails": {"actualStartTime": "2026-11-22T12:01:00Z"}}]})
+    out = await y.live([{"platform_id": cid}])
+    assert out[cid]["video_id"] == "w" and y._upcoming_ids == {}

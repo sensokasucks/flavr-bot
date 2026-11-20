@@ -1,10 +1,10 @@
 """
-Groups of people: FlaVR and Friends are built in, more can be added with /group add (owner or
+Groups of people: FlaVR, Friends and Community are built in, more can be added with /group add (owner or
 Manage Server). Each group has its own go-live channel, calendar post, recap and share text, all
 keyed by the group's key (a short lower-case slug of its name, e.g. "Art Pals" → "art-pals").
 
 Saved in the database (kv ``groups``): {key: {"name": shown name, "colour": "#rrggbb"}} for the
-custom groups only; the built-in two are in DEFAULTS and can't be removed (their colour and name
+custom groups only; the built-in three are in DEFAULTS and can't be removed (their colour and name
 can be changed). Removing a custom group moves its people to Friends.
 
 Who reads it: everything that used to know only "flavr" / "friends": flavrbot/bot.py (commands,
@@ -22,6 +22,10 @@ from typing import Any, Dict, List, Optional
 DEFAULTS: Dict[str, Dict[str, str]] = {
     "flavr": {"name": "FlaVR", "colour": "#f72ca2"},       # the logo's pink (it also uses lime, yellow, teal)
     "friends": {"name": "Friends", "colour": "#2ae0d4"},   # plain teal
+    # streams members add from their self-promo posts (flavrbot/promo.py); its board only posts once
+    # /community report-channel (or /setup calendar-channel) picks a channel. People can be put in it
+    # too (/friend group), and are then followed like anyone else.
+    "community": {"name": "Community", "colour": "#9b6bff"},   # violet: not one of the FlaVR logo's colours
 }
 MAX_GROUPS = 20             # Discord autocomplete shows 25 choices; leave room
 _store: Any = None
@@ -101,7 +105,7 @@ def add(display: str, col: str = "#2ae0d4") -> str:
 
 
 def update(key: str, display: Optional[str] = None, col: Optional[str] = None) -> None:
-    """Rename a group or change its colour (the built-in two too); the key never changes."""
+    """Rename a group or change its colour (the built-in three too); the key never changes."""
     saved = _saved()
     cur = dict(saved.get(key, {}))
     if display:
@@ -127,6 +131,8 @@ def title(key: str, recap: bool) -> str:
     if key == "flavr":
         return "WEEK IN REVIEW" if recap else "THIS WEEK"
     n = name(key).upper()
+    if key == "community":
+        return f"{n}: WEEK IN REVIEW" if recap else f"{n} STREAMS THIS WEEK"
     return f"{n}: WEEK IN REVIEW" if recap else f"THIS WEEK WITH {n}"
 
 
@@ -135,6 +141,8 @@ def heading(key: str, recap: bool) -> str:
     n = name(key)
     if recap:
         return f"{n} week in review"
+    if key == "community":
+        return f"{n} streams this week"
     return f"This week in {n}" if key == "flavr" else f"This week with {n}"
 
 

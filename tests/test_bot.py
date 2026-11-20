@@ -13,8 +13,14 @@ async def test_commands_register():
     store = Store(":memory:")
     groups.init(store)
     bot = FlavrBot(s, store, CoreLink(store, "k"), Pinger(store, None), Watcher(store, {}, {}))
-    names = sorted(c.name for c in bot.tree.get_commands())
-    assert names == ["backup", "birthday", "calendar", "friend", "group", "growth", "live", "live-mode", "lockdown",
+    from discord import app_commands
+    names = sorted(c.name for c in bot.tree.get_commands() if not isinstance(c, app_commands.ContextMenu))
+    # the community calendar's message menu entries (flavrbot/promo.py; Discord allows 5 per app)
+    menus = sorted(c.name for c in bot.tree.get_commands() if isinstance(c, app_commands.ContextMenu))
+    assert menus == ["Add to community calendar", "Remove from community calendar"]
+    community = next(c for c in bot.tree.get_commands() if c.name == "community")
+    assert sorted(c.name for c in community.commands) == ["list", "remove", "report-channel", "roles", "schedule"]
+    assert names == ["backup", "birthday", "calendar", "community", "friend", "group", "growth", "live", "live-mode", "lockdown",
                      "me", "mod", "modmail", "pings", "points", "queue", "roles", "said", "schedule", "setup", "status",
                      "talent", "wake", "warn", "warnings", "welcome"]
     me = next(c for c in bot.tree.get_commands() if c.name == "me")
@@ -32,6 +38,8 @@ async def test_commands_register():
     # every command's description fits Discord's 100-character limit
     for c in bot.tree.walk_commands():
         assert len(c.description) <= 100, c.name
+        for p in getattr(c, "parameters", []):
+            assert len(p.description) <= 100, (c.name, p.name)
     await bot.close()
 
 

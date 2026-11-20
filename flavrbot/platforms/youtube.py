@@ -15,6 +15,9 @@ Past weeks (``past_streams``, for Watcher.backfill): the channel's uploads list
 their real start and end times. Finished livestreams are in the uploads list as long as the
 streamer keeps the VOD public.
 
+Community posts (``videos``, flavrbot/promo.py): one videos.list per check for the streams members
+added to the community calendar, to follow each from scheduled to live to finished.
+
 Videos already known to be over are remembered (``_done``) and never asked about again.
 
 Waiting rooms made long ahead (Sen 2026-11-20: Amanda's Nov 22 stream, made Oct 22, never showed):
@@ -233,4 +236,35 @@ class YouTube:
                 out.append({"started_at": start, "ended_at": end, "title": str((v.get("snippet") or {}).get("title") or ""),
                             "url": f"https://www.youtube.com/watch?v={vid}",
                             "thumb": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"})
+        return out
+
+    async def videos(self, ids: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Community posts (flavrbot/promo.py): what each video is now, 1 quota unit per 50 ids.
+        → {video id: {state ("upcoming" / "live" / "past" / "upload"), at, end, title, channel_id,
+        channel, thumb, url}}; a video YouTube doesn't return (deleted, private) is left out."""
+        out: Dict[str, Dict[str, Any]] = {}
+        if not self.api_key:
+            return out
+        for part in chunks(sorted(set(ids)), 50):
+            data = await self._api("/videos", {"part": "snippet,liveStreamingDetails", "id": ",".join(part)})
+            for v in data.get("items") or []:
+                vid = str(v.get("id") or "")
+                sn = v.get("snippet") or {}
+                ld = v.get("liveStreamingDetails")
+                state = sn.get("liveBroadcastContent")
+                start = iso_ts(str((ld or {}).get("actualStartTime") or ""))
+                end = iso_ts(str((ld or {}).get("actualEndTime") or ""))
+                if not ld:
+                    kind = "upload"            # a plain video, not a stream
+                elif state == "live":
+                    kind = "live"
+                elif state == "upcoming":
+                    kind = "upcoming"
+                    start = iso_ts(str(ld.get("scheduledStartTime") or ""))
+                else:
+                    kind = "past" if start and end else "upload"
+                out[vid] = {"state": kind, "at": start, "end": end, "title": str(sn.get("title") or ""),
+                            "channel_id": str(sn.get("channelId") or ""), "channel": str(sn.get("channelTitle") or ""),
+                            "url": f"https://www.youtube.com/watch?v={vid}",
+                            "thumb": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"}
         return out

@@ -25,6 +25,11 @@ Tables
             itself in. chat_fts is its word index (SQLite FTS5) when the SQLite build has FTS5.
   moments   chat moments Core spotted (fridge-stream-core/core/chat_moments.py "moment"): when,
             how busy, the usual, and a Twitch clip link when Core made one. For the recap.
+  promo     the community calendar (flavrbot/promo.py): streams members added from their self-promo
+            posts. One row per stream: platform, what the link points at (item_key: a YouTube video
+            id, a Twitch VOD id, or "<channel>@<time>" for a Twitch / Kick channel link), its state
+            (waiting / scheduled / live / past), times, title, picture, who posted it and which
+            Discord message it came from (so deleting the post drops it).
   alerts    every alert Core sent (raids, subs, gifts, tips) as JSON, for the after-stream recap
             (flavrbot/recap.py). Both are pruned after KEEP_EVENTS_DAYS.
 
@@ -47,7 +52,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 PLATFORMS = ("youtube", "twitch", "kick")      # also the main-platform fallback order
-GROUPS = ("flavr", "friends")             # the built-in two; more come from flavrbot/groups.py (/group add)
+GROUPS = ("flavr", "friends")             # FlaVR + Friends (Community, flavrbot/promo.py, is the third built-in); more come from flavrbot/groups.py (/group add)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -126,6 +131,31 @@ CREATE TABLE IF NOT EXISTS alerts (
   data TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS alerts_at ON alerts(at);
+CREATE TABLE IF NOT EXISTS promo (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  platform TEXT NOT NULL,
+  item_key TEXT NOT NULL,
+  channel TEXT NOT NULL DEFAULT '',
+  platform_id TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL,
+  at REAL NOT NULL,
+  end_at REAL,
+  until REAL,
+  last_seen REAL,
+  title TEXT NOT NULL DEFAULT '',
+  game TEXT NOT NULL DEFAULT '',
+  url TEXT NOT NULL DEFAULT '',
+  thumb TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL DEFAULT '',
+  avatar TEXT NOT NULL DEFAULT '',
+  author_id TEXT NOT NULL DEFAULT '',
+  added_by TEXT NOT NULL DEFAULT '',
+  added_at REAL NOT NULL,
+  post_channel TEXT NOT NULL DEFAULT '',
+  post_message TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS promo_key ON promo(platform, item_key);
+CREATE INDEX IF NOT EXISTS promo_at ON promo(at);
 CREATE TABLE IF NOT EXISTS manual_schedule (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   person_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
@@ -613,3 +643,76 @@ class Store:
         with self._lock:
             return [dict(r) for r in self._db.execute(q, (a, b, limit) if limit else (a, b))]
 
+    # ── community calendar (flavrbot/promo.py) ─────────────────────────
+    def promo_add(self, **fields: Any) -> int:
+        """A new community stream; returns its id, or 0 when that stream is already on (same platform +
+        item_key: a duplicate merges into the first one)."""
+        cols = ", ".join(fields)
+        with self._lock:
+            try:
+                cur = self._db.execute(f"INSERT INTO promo({cols}) VALUES({', '.join('?' for _ in fields)})",
+                                       tuple(fields.values()))
+                self._db.commit()
+                return int(cur.lastrowid)
+            except sqlite3.IntegrityError:
+                return 0
+
+    def promo_update(self, pid: int, **fields: Any) -> bool:
+        """Change one row. False when the change would make it a twin of another row (same item_key):
+        the caller then drops this one (promo.Promo._tick)."""
+        sets = ", ".join(f"{k}=?" for k in fields)
+        with self._lock:
+            try:
+                self._db.execute(f"UPDATE promo SET {sets} WHERE id=?", (*fields.values(), pid))
+                self._db.commit()
+                return True
+            except sqlite3.IntegrityError:
+                return False
+
+    def promo_get(self, pid: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            r = self._db.execute("SELECT * FROM promo WHERE id=?", (pid,)).fetchone()
+        return dict(r) if r else None
+
+    def promo_remove(self, pid: int) -> bool:
+        with self._lock:
+            n = self._db.execute("DELETE FROM promo WHERE id=?", (pid,)).rowcount
+            self._db.commit()
+        return n > 0
+
+    def promo_for_message(self, message_id: str) -> List[Dict[str, Any]]:
+        """Rows added from one Discord post (the Remove menu, and a deleted post)."""
+        with self._lock:
+            return [dict(r) for r in self._db.execute("SELECT * FROM promo WHERE post_message=? AND post_message != ''",
+                                                      (str(message_id),))]
+
+    def promo_between(self, a: float, b: float) -> List[Dict[str, Any]]:
+        """Rows whose stream starts (or is planned) in [a, b): the community board's week."""
+        with self._lock:
+            return [dict(r) for r in self._db.execute("SELECT * FROM promo WHERE at >= ? AND at < ? ORDER BY at", (a, b))]
+
+    def promo_active(self) -> List[Dict[str, Any]]:
+        """Rows still changing (waiting, scheduled, live): the ones promo.Promo checks."""
+        with self._lock:
+            return [dict(r) for r in self._db.execute("SELECT * FROM promo WHERE state != 'past' ORDER BY at")]
+
+    def promo_twin(self, platform: str, channel: str, at: float, window: float) -> Optional[Dict[str, Any]]:
+        """A row for the same channel within ``window`` seconds of ``at`` (a channel link added twice, or
+        a VOD link for a stream already added from its channel link)."""
+        with self._lock:
+            r = self._db.execute("SELECT * FROM promo WHERE platform=? AND lower(channel)=lower(?) AND channel != '' "
+                                 "AND ABS(at - ?) < ? ORDER BY id LIMIT 1", (platform, channel, at, window)).fetchone()
+        return dict(r) if r else None
+
+    def promo_open_for(self, platform: str, channel: str) -> Optional[Dict[str, Any]]:
+        """A channel's row that is still waiting or live (one at a time per channel)."""
+        with self._lock:
+            r = self._db.execute("SELECT * FROM promo WHERE platform=? AND lower(channel)=lower(?) AND channel != '' "
+                                 "AND state IN ('waiting', 'live') ORDER BY id LIMIT 1", (platform, channel)).fetchone()
+        return dict(r) if r else None
+
+    def promo_added_since(self, author_id: str, since: float) -> int:
+        """How many streams this Discord user's posts added since ``since`` (the weekly limit)."""
+        with self._lock:
+            return int(self._db.execute("SELECT COUNT(*) FROM promo WHERE author_id=? AND added_at >= ?",
+                                        (str(author_id), since)).fetchone()[0])

@@ -79,12 +79,13 @@ async def test_stream_to_recap_through_core_link():
         posts.append((channel, text))
 
     hb = {"viewers": 0}
-    r = Recapper(store, post_text, ping, lambda: hb, delay_min=3, clock=lambda: now[0])
+    # the owner's streams as FlaVR Promo's /live.json lists them (flavrbot/promo_link.py owner_streams)
+    streams = [{"started_at": T + 20, "ended_at": T + 3590, "url": "https://www.twitch.tv/sen",
+                "vod_url": "https://www.twitch.tv/videos/77"},
+               {"started_at": T - 86000, "ended_at": T - 80000, "url": "", "vod_url": "https://old"}]
+    r = Recapper(store, post_text, ping, lambda: hb, delay_min=3, clock=lambda: now[0], streams=lambda: streams)
     link.on_alert, link.on_moment, link.on_stream = r.on_alert, r.on_moment, r.on_stream
     store.put("recap_channel", "55")
-    owner = store.add_person("Sen", is_owner=True)
-    store.start_session(owner, T + 20, platforms=["twitch"], url="https://www.twitch.tv/sen",
-                        vod_url="https://www.twitch.tv/videos/77")
 
     await link.handle("stream", {"event": "started", "started_at": T, "platforms": ["twitch"]})
     hb["viewers"] = 41

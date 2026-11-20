@@ -6,8 +6,8 @@ The Stream Core side door: Core (on the stream PC) sends what it knows to this b
                      "data": {...}, "at": unix s}
                     answer {"ok": true, "chat_since": <highest chat row id the bot has>}
   GET  /health      {"ok": true}  (no password; Docker's health check)
-  GET  /calendar...  the weekly calendar page, picture and .ics feed (flavrbot/web.py, added
-                     through ``extra_routes`` by flavrbot/__main__.py)
+
+(The calendar pages moved to FlaVR Promo's own port, 3871, with the split on 2026-11-20.)
 
 The sender is flavr-leftovers fridge-stream-core/core/companion_link.py; docs/CORE_LINK.md lists
 every message and field. Keep the three in sync.
@@ -25,8 +25,8 @@ What this file does with them (``CoreLink``):
   * watches the heartbeat: no heartbeat for HEARTBEAT_LATE_SEC while Core last said "live" calls
     ``on_core_lost()``; the next heartbeat after that calls ``on_core_back()``. Two things keep
     that alarm quiet after a stream that simply ended (Sen 2026-11-20: Core was closed before it
-    noticed the stream end, so the bot still thought "live"): ``owner_live()`` (the go-live
-    watcher, set by flavrbot/__main__.py) saying the owner is offline everywhere counts as "the
+    noticed the stream end, so the bot still thought "live"): ``owner_live()`` (FlaVR Promo's go-live
+    watcher, read through flavrbot/promo_link.py and set by flavrbot/__main__.py) saying the owner is offline everywhere counts as "the
     stream ended", and ``mark_done()`` (/core done) ends it by hand and stays quiet until Core's
     next heartbeat.
 
@@ -66,16 +66,15 @@ class CoreLink:
         self.on_core_back: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
         self.lost = False                       # True after on_core_lost until a heartbeat comes
         self.quiet_back = False                 # the next heartbeat after mark_done says nothing
-        # the go-live watcher's view of the owner: True live somewhere, False offline everywhere,
-        # None unknown (no owner followed). Set by flavrbot/__main__.py (Watcher.owner_live).
+        # FlaVR Promo's go-live watcher's view of the owner: True live somewhere, False offline
+        # everywhere, None unknown (no PROMO_URL, Promo not answering, or no owner followed there).
+        # Set by flavrbot/__main__.py (PromoLink.owner_live, flavrbot/promo_link.py).
         self.owner_live: Callable[[], Optional[bool]] = lambda: None
         self.heartbeat: Dict[str, Any] = store.get("core.heartbeat", {}) or {}
         self.heartbeat_at: Optional[float] = store.get("core.heartbeat_at")
         self.snapshot: Dict[str, Any] = store.get("core.snapshot", {}) or {}
         self.snapshot_at: Optional[float] = store.get("core.snapshot_at")
         self.refused = 0                        # pushes with a wrong password (shown on /status)
-        # more pages on the same port: each is called with the aiohttp app (flavrbot/web.py add_routes)
-        self.extra_routes: list[Callable[[web.Application], None]] = []
         self._runner: Optional[web.AppRunner] = None
         self._watch: Optional[asyncio.Task] = None
 
@@ -95,8 +94,6 @@ class CoreLink:
         app = web.Application(client_max_size=MAX_BODY)
         app.router.add_post("/core/push", self._push)
         app.router.add_get("/health", self._health)
-        for add in self.extra_routes:
-            add(app)
         return app
 
     async def _health(self, request: web.Request) -> web.Response:
@@ -178,7 +175,7 @@ class CoreLink:
             return
         if self.clock() - self.heartbeat_at >= self.late_sec and self.stream().get("state") in ("live", "dropped"):
             if self.owner_live() is False:
-                # the watcher sees the owner offline on every platform: the stream ended and Core was
+                # FlaVR Promo's watcher sees the owner offline on every platform: the stream ended and Core was
                 # closed before it said so. Not a crash, so no alarm.
                 self.mark_done(quiet=False)
                 log.info("Core went quiet after the stream ended (offline everywhere); no alarm")

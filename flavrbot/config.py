@@ -54,30 +54,20 @@ class Settings:
     core_key: str = ""                  # shared password; Core sends it as "Authorization: Bearer ..."
     listen_host: str = "0.0.0.0"        # home network only: never forward this port on the router
     listen_port: int = 3870
-    web_address: str = ""               # how phones / PCs at home reach this bot's pages ("" = found by itself)
     heartbeat_late_sec: int = 90        # no heartbeat this long during a stream = "Core stopped answering"
     # Wake-on-LAN (/wake)
     stream_pc_mac: str = ""
     wol_broadcast: str = "255.255.255.255"
-    # Platform look-ups for the go-live watcher (official APIs only)
-    twitch_client_id: str = ""
-    twitch_client_secret: str = ""
-    youtube_api_key: str = ""
-    kick_client_id: str = ""
-    kick_client_secret: str = ""
-    # How often each platform is checked (seconds); kept polite on purpose
-    twitch_every: int = 120
-    youtube_every: int = 600
-    kick_every: int = 180
+    # FlaVR Promo (sensokasucks/flavr-promo; the go-live watcher and calendar moved there 2026-11-20):
+    # its address, e.g. http://127.0.0.1:3871. flavrbot/promo_link.py reads its /live.json every
+    # minute: is the owner live (the Core alarm stays quiet after a stream, live mode follows it while
+    # Core is off) and the owner's VOD for the recap. "" = not asked; Core alone drives those.
+    promo_url: str = ""
     # Phone pings
     timezone: str = "America/New_York"
     quiet_hours: tuple[int, int] = (3, 11)
     big_tip: float = 20.0               # tips / Super Chats at least this much (in their own currency)
     big_gift: int = 10                  # gifted subs at least this many at once
-    # Weekly calendar (flavrbot/calendar_post.py): Sunday preview hour (TZ, 0-23); the Friday / Monday
-    # reviews' times are set in Discord (/setup review-times)
-    calendar_preview_hour: int = 10
-    chromium_path: str = ""             # blank = Playwright's own Chromium (the Docker image has it)
     # Server care (flavrbot/server_care.py)
     scam_timeout_min: int = 60          # timeout for someone who posts a scam link (minutes; 0 = none)
     backup_hour: int = 4                # daily server layout backup at this hour (TZ, 0-23)
@@ -95,19 +85,9 @@ class Settings:
     recap_delay_min: int = 3
     ollama_url: str = ""                # e.g. http://127.0.0.1:11434
     ollama_model: str = "llama3.2:3b"
-    # Community calendar (flavrbot/promo.py): streams people add from their self-promo posts
-    promo_weekly_limit: int = 7         # posts one person can add in 7 days (mods have no limit)
-    promo_wait_hours: int = 6           # a channel link added while offline (no time given) waits this long to go live
     # Storage
     data_dir: str = "/data"
     extra: Dict[str, str] = field(default_factory=dict)
-
-    @property
-    def watcher_ready(self) -> Dict[str, bool]:
-        """Which platforms the go-live watcher can ask (their keys are set)."""
-        return {"twitch": bool(self.twitch_client_id and self.twitch_client_secret),
-                "youtube": True,      # RSS needs no key; the API key only makes live checks exact
-                "kick": bool(self.kick_client_id and self.kick_client_secret)}
 
 
 def load(env: Optional[Mapping[str, str]] = None) -> Settings:
@@ -121,24 +101,14 @@ def load(env: Optional[Mapping[str, str]] = None) -> Settings:
         core_key=g("FLAVR_CORE_KEY"),
         listen_host=g("LISTEN_HOST", "0.0.0.0"),
         listen_port=_int(env, "LISTEN_PORT", 3870),
-        web_address=g("WEB_ADDRESS").rstrip("/"),
         heartbeat_late_sec=max(45, _int(env, "HEARTBEAT_LATE_SEC", 90)),
         stream_pc_mac=g("STREAM_PC_MAC"),
         wol_broadcast=g("WOL_BROADCAST", "255.255.255.255"),
-        twitch_client_id=g("TWITCH_CLIENT_ID"),
-        twitch_client_secret=g("TWITCH_CLIENT_SECRET"),
-        youtube_api_key=g("YOUTUBE_API_KEY"),
-        kick_client_id=g("KICK_CLIENT_ID"),
-        kick_client_secret=g("KICK_CLIENT_SECRET"),
-        twitch_every=max(60, _int(env, "TWITCH_EVERY_SEC", 120)),
-        youtube_every=max(300, _int(env, "YOUTUBE_EVERY_SEC", 600)),
-        kick_every=max(120, _int(env, "KICK_EVERY_SEC", 180)),
+        promo_url=g("PROMO_URL").rstrip("/"),
         timezone=g("TZ", "America/New_York"),
         quiet_hours=_hours(g("QUIET_HOURS"), (3, 11)),
         big_tip=float(g("BIG_TIP", "20") or 20),
         big_gift=max(1, _int(env, "BIG_GIFT", 10)),
-        calendar_preview_hour=_int(env, "CALENDAR_PREVIEW_HOUR", 10) % 24,
-        chromium_path=g("CHROMIUM_PATH"),
         scam_timeout_min=max(0, min(40320, _int(env, "SCAM_TIMEOUT_MIN", 60))),     # Discord's cap: 28 days
         backup_hour=_int(env, "BACKUP_HOUR", 4) % 24,
         backup_keep=max(1, _int(env, "BACKUP_KEEP", 30)),
@@ -151,8 +121,6 @@ def load(env: Optional[Mapping[str, str]] = None) -> Settings:
         recap_delay_min=max(1, min(60, _int(env, "RECAP_DELAY_MIN", 3))),
         ollama_url=g("OLLAMA_URL").rstrip("/"),
         ollama_model=g("OLLAMA_MODEL", "llama3.2:3b"),
-        promo_weekly_limit=max(1, _int(env, "PROMO_WEEKLY_LIMIT", 7)),
-        promo_wait_hours=max(1, min(48, _int(env, "PROMO_WAIT_HOURS", 6))),
         data_dir=g("DATA_DIR", "/data"),
     )
 

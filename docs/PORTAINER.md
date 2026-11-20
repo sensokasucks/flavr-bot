@@ -20,4 +20,9 @@ Notes
 * The database is in the named volume `flavr-bot_flavr-bot-data` (`/data` inside). Redeploys keep it.
 * If this PC runs a firewall (ufw), allow the port from the home network only:
   `sudo ufw allow from 192.168.1.0/24 to any port 3870 proto tcp` (use your own network).
+* FlaVR Promo (the go-live posts and the calendar since 2026-11-20) is a separate stack,
+  `flavr-promo`, with its own guide. Its first start copies this bot's calendar data from
+  `/var/lib/docker/volumes/flavr-bot_flavr-bot-data/_data` (read-only). Deploy it first, then update
+  this stack to the version without the calendar, so go-lives aren't posted twice. Then set
+  `PROMO_URL` here (same PC: `http://127.0.0.1:3871`) and **Update the stack**.
 * Changing a setting: Stacks → flavr-bot → Environment variables → edit → **Update the stack**.

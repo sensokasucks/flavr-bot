@@ -2,11 +2,13 @@
 Start FlaVR Bot: ``python -m flavrbot`` (the Docker image's command).
 
 Builds, in order: settings (environment), the database, the Stream Core link (web listener),
-phone pings, the after-stream recap (flavrbot/recap.py), the go-live watcher with its platform checkers, the Discord client (after reading which
-privileged intents the developer portal allows) with server care, then the weekly
-calendar (its posts, and its pages on the same web listener) and the community calendar
-(flavrbot/promo.py, streams members add from their posts), and runs them all on one event
-loop until the container stops.
+phone pings, the link to FlaVR Promo (flavrbot/promo_link.py, optional), the after-stream recap
+(flavrbot/recap.py), the Discord client (after reading which privileged intents the developer
+portal allows) with server care, and runs them all on one event loop until the container stops.
+
+The go-live watcher, the weekly calendar and the community calendar moved to FlaVR Promo
+(sensokasucks/flavr-promo, its own stack and Discord app) on 2026-11-20. FlaVR Bot still asks it
+whether the owner is live (PROMO_URL) for the Core alarm, live mode and the recap's VOD link.
 """
 
 from __future__ import annotations
@@ -20,21 +22,14 @@ from pathlib import Path
 import aiohttp
 import discord
 
-from . import config, groups
+from . import config
 from .bot import FlavrBot
-from .calendar_post import CalendarPoster
 from .core_link import CoreLink
 from .pings import Pinger
-from .promo import Promo
+from .promo_link import PromoLink
 from .recap import Recapper
-from .platforms.kick import Kick
-from .platforms.twitch import Twitch
-from .platforms.youtube import DEEP_CHECK, YouTube
-from .render import ImageCache, Screenshotter
 from .server_care import gateway_intents
 from .store import Store
-from .watcher import Watcher
-from .web import add_routes
 
 log = logging.getLogger("flavrbot")
 
@@ -47,22 +42,13 @@ async def main() -> int:
         log.error("%s", p)
     if not s.discord_token or not s.owner_id:
         return 2                # nothing works without these; the log says what to set
+    # FlaVR Promo copies this file once on its first start (flavr-promo IMPORT_DIR); keep the name
     store = Store(Path(s.data_dir) / "flavr_bot.db")
-    groups.init(store)                      # custom groups (/group add) live in this database
-    folded = store.merge_overlaps()         # streams counted twice by an older version (or a long outage)
-    if folded:
-        log.info("Merged %d stream(s) that had been counted twice", folded)
     link = CoreLink(store, s.core_key, late_sec=s.heartbeat_late_sec)
 
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20)) as http:
-        checkers = {
-            "twitch": Twitch(http, s.twitch_client_id, s.twitch_client_secret),
-            "youtube": YouTube(http, s.youtube_api_key),
-            "kick": Kick(http, s.kick_client_id, s.kick_client_secret),
-        }
-        # the YouTube deep check (/setup youtube-check; off unless the owner picked daily / 48h / weekly)
-        checkers["youtube"].search_every = DEEP_CHECK.get(str(store.get("youtube_deep_check") or "off"), 0.0)
-        watcher = Watcher(store, checkers, {"twitch": s.twitch_every, "youtube": s.youtube_every, "kick": s.kick_every})
+        # FlaVR Promo's /live.json, read every minute (PROMO_URL; empty = never asked)
+        promo = PromoLink(http, s.promo_url)
         bot: FlavrBot
 
         async def send(text: str) -> None:
@@ -76,7 +62,7 @@ async def main() -> int:
         for key, label in (("content", "Message Content"), ("members", "Server Members")):
             if not gateway[key]:
                 log.warning("%s Intent is off in the developer portal: server care runs with less (see /setup check)", label)
-        bot = FlavrBot(s, store, link, pinger, watcher, gateway=gateway)
+        bot = FlavrBot(s, store, link, pinger, promo, gateway=gateway)
         async def on_core_stream(change):
             # Stream Core's own start / end: the phone ping, then live mode (flavrbot/community.py)
             await pinger.on_stream(change)
@@ -87,8 +73,10 @@ async def main() -> int:
 
         # after-stream recap + chat moments (flavrbot/recap.py): keeps alerts / moments, posts RECAP_DELAY_MIN
         # after Core says the stream ended, to /setup recap-channel and the owner's DMs (/pings recap)
+        # the recap's VOD link comes from FlaVR Promo's owner_streams (none without PROMO_URL)
         recapper = Recapper(store, bot.post_text, pinger.ping, lambda: link.heartbeat, delay_min=s.recap_delay_min,
-                            ollama_url=s.ollama_url, ollama_model=s.ollama_model, tz=ZoneInfo(s.timezone))
+                            ollama_url=s.ollama_url, ollama_model=s.ollama_model, tz=ZoneInfo(s.timezone),
+                            streams=lambda: promo.owner_streams)
 
         async def on_core_alert(a):
             await pinger.on_alert(a)
@@ -98,75 +86,25 @@ async def main() -> int:
         link.on_alert = on_core_alert
         link.on_moment = recapper.on_moment
         link.on_core_lost = pinger.core_lost
-        link.owner_live = watcher.owner_live    # offline everywhere = the stream ended; Core closing isn't a crash
+        link.owner_live = promo.owner_live      # offline everywhere = the stream ended; Core closing isn't a crash
         link.on_core_back = pinger.core_back
-        shooter = Screenshotter(s.chromium_path)
-        poster = CalendarPoster(store, bot, ImageCache(Path(s.data_dir) / "cache" / "img", http), shooter,
-                                tz=s.timezone, preview_hour=s.calendar_preview_hour,
-                                ping=lambda: pinger.switches().get("calendar", False), quiet=pinger.quiet_now,
-                                hold=lambda text: pinger.ping("calendar", text), backfill=watcher.backfill,
-                                share_on=lambda: pinger.switches().get("share", False))
-        bot.calendar = poster
-        # community calendar (flavrbot/promo.py): streams members add from their posts, followed with the
-        # same platform clients; settings PROMO_WEEKLY_LIMIT, PROMO_WAIT_HOURS
-        bot.promo = Promo(store, checkers, ZoneInfo(s.timezone), weekly_limit=s.promo_weekly_limit,
-                          wait_hours=s.promo_wait_hours, poke=poster.poke)
-        poster.web_url = s.web_address or web_address(s.listen_port)    # the X Article link in share DMs
-        link.extra_routes.append(lambda app: add_routes(app, poster))
 
-        # go-live posts first, then a nudge so the calendar redraws within seconds
-        async def on_start(person, session, live_on):
-            out = await bot.post_start(person, session, live_on)
-            poster.poke()
-            if person.get("is_owner"):          # the watcher saw the owner go live (Core may be off): live mode
-                await bot.community.live_mode(True, session.get("game") or "")
-            return out
+        # FlaVR Promo saw the owner go live / end / change game: live mode follows, even with Core off
+        async def on_owner(live: bool, game: str) -> None:
+            await bot.community.live_mode(live, game)
 
-        async def on_end(person, session):
-            await bot.post_end(person, session)
-            poster.poke()
-            if person.get("is_owner"):
-                await bot.community.live_mode(False)
-
-        watcher.on_start = on_start
-        async def on_change(person, session, live_on):
-            await bot.post_change(person, session, live_on)
-            if person.get("is_owner") and session.get("game"):     # new game: the voice channel name follows
-                await bot.community.live_mode(True, session["game"])
-
-        watcher.on_change = on_change
-        watcher.on_end = on_end
-        watcher.on_scheduled = poster.on_scheduled
+        promo.on_owner = on_owner
 
         await link.start(s.listen_host, s.listen_port)
-        async def watch(platform: str) -> None:
-            await bot.ready_event.wait()        # posts need the Discord channels loaded
-            await watcher.run_platform(platform)
-
         async def after_ready(job):
             await bot.ready_event.wait()        # posts need the Discord channels loaded
             await job()
 
-        async def fill_in() -> None:
-            # the bot only knows streams it saw live: fill last week and this week from the platforms
-            # (after the first checks have found everyone's channel ids)
-            await asyncio.sleep(120)
-            for off in (-1, 0):
-                await poster.ensure_backfill(poster.week_of(off), force=True)
-
         tasks = [asyncio.create_task(pinger.run(), name="pings"),
-                 asyncio.create_task(after_ready(fill_in), name="backfill"),
-                 asyncio.create_task(after_ready(poster.run), name="calendar"),
-                 asyncio.create_task(after_ready(watcher.run_schedules), name="schedules"),
+                 asyncio.create_task(after_ready(promo.run), name="promo-link"),
                  asyncio.create_task(after_ready(bot.care.run_backups), name="backups"),
                  asyncio.create_task(after_ready(bot.community.run_daily), name="moments"),
-                 asyncio.create_task(after_ready(recapper.run), name="recap"),
-                 asyncio.create_task(after_ready(bot.promo.run), name="community")]
-        for platform, checker in checkers.items():
-            if checker.ready:
-                tasks.append(asyncio.create_task(watch(platform), name=f"watch-{platform}"))
-            else:
-                log.info("%s watcher off: its keys aren't set (.env.example)", platform.title())
+                 asyncio.create_task(after_ready(recapper.run), name="recap")]
         try:
             await bot.start(s.discord_token)
         except discord.PrivilegedIntentsRequired:
@@ -180,22 +118,8 @@ async def main() -> int:
             for t in tasks:
                 t.cancel()
             await link.stop()
-            await shooter.close()
             await bot.close()
     return 0
-
-
-def web_address(port: int) -> str:
-    """This PC's home network address as "http://192.168.0.20:3870". A UDP "connect" sends nothing; it
-    only asks the system which address it would use (the stack uses host networking, so this is the
-    Linux PC's own). Falls back to a placeholder the owner can read; WEB_ADDRESS overrides it."""
-    import socket
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as so:
-            so.connect(("10.255.255.255", 1))
-            return f"http://{so.getsockname()[0]}:{port}"
-    except OSError:
-        return f"http://<this PC>:{port}"
 
 
 if __name__ == "__main__":

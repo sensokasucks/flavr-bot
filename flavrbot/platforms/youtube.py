@@ -22,12 +22,20 @@ Videos already known to be over are remembered (``_done``) and never asked about
 
 Waiting rooms made long ahead (Sen 2026-11-20: Amanda's Nov 22 stream, made Oct 22, never showed):
 the RSS feed lists only the 15 newest videos, so a waiting room drops out of it once the channel
-posts 15 more. Two things catch those:
+posts 15 more. Three things catch those:
   * every upcoming stream found is remembered (``_upcoming_ids``) and asked about directly until it
     goes live, ends or is gone, even after it leaves the feed;
-  * once every SEARCH_EVERY per channel, one Data API ``search.list`` (eventType=upcoming, 100 quota
-    units) asks YouTube for that channel's scheduled streams, wherever they are in its list. About
-    15 channels x 100 = 1,500 of the 10,000 free daily units. It runs at start-up too (memory only).
+  * every UPLOADS_EVERY (6 h) per channel, its uploads list (playlistItems.list, the 50 newest
+    videos, 1 quota unit) instead of the feed's 15; only videos not yet known are then asked about
+    (videos.list, 1 unit per 50). Waiting rooms sit in that list like any video;
+  * the deep check, OFF by default (owner 2026-11-20): one ``search.list`` per channel
+    (eventType=upcoming, 100 quota units) for its scheduled streams wherever they are, every
+    ``search_every`` seconds. The owner picks off / daily / every 48 h / weekly with
+    /setup youtube-check (kv "youtube_deep_check", DEEP_CHECK below); flavrbot/__main__.py and that
+    command set ``search_every``. About 15 channels x 100 = 1,500 of the 10,000 free daily units a run.
+    It runs at start-up too when on (the times are kept in memory only).
+Premieres count as streams (YouTube calls a scheduled premiere "upcoming", then "live" while it
+plays). Shorts and ordinary uploads are skipped: the calendar is for streams.
 """
 
 from __future__ import annotations
@@ -52,7 +60,10 @@ CHANNEL_ID = re.compile(r"^UC[\w-]{22}$")
 # Only feed videos this new are asked about. Waiting rooms are often made weeks ahead, so this
 # is long; every video is asked about once and remembered (_done) once it's over or an upload.
 FRESH_DAYS = 45
-SEARCH_EVERY = 24 * 3600.0      # per channel: one search.list for scheduled streams (100 quota units)
+UPLOADS_EVERY = 6 * 3600.0      # per channel: its 50 newest uploads (1 quota unit) to find older waiting rooms
+# the deep check's choices (/setup youtube-check, kv "youtube_deep_check"): label → seconds between
+# runs per channel (0 = off, the default). One run = one search.list = 100 quota units per channel.
+DEEP_CHECK = {"off": 0.0, "daily": 24 * 3600.0, "48h": 48 * 3600.0, "weekly": 7 * 24 * 3600.0}
 
 
 def parse_feed(xml_text: str) -> List[Dict[str, Any]]:
@@ -83,6 +94,8 @@ class YouTube:
         self.upcoming: Dict[str, List[Dict[str, Any]]] = {}   # channel id → scheduled streams (for /schedule)
         self._upcoming_ids: Dict[str, str] = {}   # video id → channel id: waiting rooms seen, asked until they start
         self._searched: Dict[str, float] = {}     # channel id → last search.list for its upcoming streams
+        self._scanned: Dict[str, float] = {}      # channel id → last read of its uploads list
+        self.search_every = 0.0                   # the deep check: seconds between runs, 0 = off (DEEP_CHECK)
 
     @property
     def ready(self) -> bool:
@@ -125,6 +138,14 @@ class YouTube:
                 return []
             return parse_feed(await r.text())
 
+    async def newest_uploads(self, channel_id: str) -> List[str]:
+        """The channel's 50 newest videos from its uploads list (its id with UC → UU; 1 quota unit):
+        video ids. Waiting rooms and premieres are in it like any other video."""
+        data = await self._api("/playlistItems", {"part": "contentDetails", "playlistId": "UU" + channel_id[2:],
+                                                  "maxResults": "50"})
+        return [str((i.get("contentDetails") or {}).get("videoId") or "") for i in data.get("items") or []
+                if (i.get("contentDetails") or {}).get("videoId")]
+
     async def search_upcoming(self, channel_id: str) -> List[str]:
         """The channel's scheduled streams straight from YouTube's search (100 quota units): video ids."""
         data = await self._api("/search", {"part": "id", "channelId": channel_id, "eventType": "upcoming",
@@ -133,8 +154,9 @@ class YouTube:
                 if (i.get("id") or {}).get("videoId")]
 
     async def live(self, accounts: List[Dict[str, Any]]) -> Dict[str, Live]:
-        """RSS for every channel (plus a daily search, and the waiting rooms already found), then one
-        videos.list per 50 of the fresh, not-yet-finished videos."""
+        """RSS for every channel (plus its uploads list every UPLOADS_EVERY, the deep check when it's on,
+        and the waiting rooms already found), then one videos.list per 50 of the fresh, not-yet-finished
+        videos."""
         if not self.api_key:
             return {}
         owner_of: Dict[str, str] = {}
@@ -151,7 +173,15 @@ class YouTube:
                         owner_of[v["video_id"]] = cid
             except aiohttp.ClientError as e:
                 log.info("YouTube feed for %s failed: %s", cid, e)
-            if now - self._searched.get(cid, 0.0) >= SEARCH_EVERY:
+            if now - self._scanned.get(cid, 0.0) >= UPLOADS_EVERY and CHANNEL_ID.match(cid):
+                self._scanned[cid] = now
+                try:
+                    for vid in await self.newest_uploads(cid):
+                        if vid not in self._done:
+                            owner_of.setdefault(vid, cid)
+                except (aiohttp.ClientError, RuntimeError) as e:
+                    log.info("YouTube uploads list for %s failed: %s", cid, e)
+            if self.search_every and now - self._searched.get(cid, 0.0) >= self.search_every:
                 self._searched[cid] = now           # also on failure: a quota problem shouldn't retry every check
                 try:
                     for vid in await self.search_upcoming(cid):

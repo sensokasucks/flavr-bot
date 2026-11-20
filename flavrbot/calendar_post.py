@@ -14,8 +14,10 @@ A group's posts only start once /setup calendar-channel picks its channel (poste
 mid-week). If the post is deleted, the next change makes a new one.
 
 Calendar pings (the "calendar" kind in /pings): what changed on the board ("Lulu scheduled Thu
-7 PM", "Pippa went live", "new week posted"), collected for PING_BATCH and sent as one DM with
-the newest FlaVR picture. During quiet hours they wait like other pings (text only).
+7 PM", "Pippa went live", "new week posted"), collected for PING_BATCH and sent as one DM per
+group with THAT group's board ("VTC calendar updated: Mumkey Dee ended" comes with the VTC board;
+fixed 2026-11-20, it used to always attach FlaVR's). During quiet hours they wait like other pings
+(text only).
 
 Saved in the database (kv):
   calendar_channel.<group>  channel id (/setup calendar-channel)
@@ -162,9 +164,9 @@ class CalendarPoster:
         self._poke = asyncio.Event()
         self._lock = asyncio.Lock()
         self._seen: Dict[str, Tuple[str, Dict[str, Tile]]] = {}    # group → (week, {key: tile}) last look
-        self._pending: List[str] = []
+        self._pending: Dict[str, List[str]] = {}      # group → change lines waiting for the next DM
         self._pending_at = 0.0
-        self._last_png: Optional[bytes] = None
+        self._png: Dict[str, bytes] = {}                # group → its newest board picture (for that DM)
         self.errors: Dict[str, str] = {}
 
     # ── outside calls ──────────────────────────────────────────────────
@@ -374,7 +376,7 @@ class CalendarPoster:
             png = await self.png(week)
             if await self.discord.cal_send(channel, embed(week), png, f"recap-{this_week:%Y-%m-%d}.png"):
                 self.store.put(f"calendar_recap.{group}", this_week.date().isoformat())
-                self._note(f"{groups.name(group)} week in review posted", png)
+                self._note(group, f"{groups.name(group)} week in review posted", png)
                 self._share_later(week, png)
 
         # which week the live board shows: a new post for a new week from Sunday PREVIEW_HOUR on
@@ -391,7 +393,7 @@ class CalendarPoster:
                                                           "message": str(msg), "sig": week.signature(), "drawn_at": now})
                 self._seen[group] = (this_week.date().isoformat(), {t.key: t for t in week.tiles()})
                 if new_week_due and posted_week:
-                    self._note(f"New {groups.name(group)} week posted", png)
+                    self._note(group, f"New {groups.name(group)} week posted", png)
                     self._share_later(week, png)
             return
         await self._edit(group, post)
@@ -412,8 +414,8 @@ class CalendarPoster:
                                          f"calendar-{start:%Y-%m-%d}.png")
         if ok:
             self.store.put(f"calendar_post.{group}", {**post, "sig": sig, "drawn_at": now})
-            if png and group == "flavr":
-                self._last_png = png
+            if png:
+                self._png[group] = png
         elif not final:
             # the post (or its channel) is gone: forget it, the next look makes a new one
             self.store.put(f"calendar_post.{group}", {})
@@ -425,29 +427,36 @@ class CalendarPoster:
         self._seen[group] = (week_key, now_tiles)
         if not before or before[0] != week_key:
             return                              # first look since start, or a new week: no diff
-        prefix = "" if group == "flavr" else f"{groups.name(group)}: "
         for text in changes(before[1], now_tiles, self.tz):
-            self._note(prefix + text)
+            self._note(group, text)
 
-    def _note(self, text: str, png: Optional[bytes] = None) -> None:
+    def _note(self, group: str, text: str, png: Optional[bytes] = None) -> None:
+        """One change line for ``group``'s next calendar DM (``png``: a picture that goes with it, e.g. the
+        week in review; else the group's newest board)."""
         if not self.ping_on():
             return
         if not self._pending:
             self._pending_at = self.clock()
-        self._pending.append(text)
+        self._pending.setdefault(group, []).append(text)
         if png:
-            self._last_png = png
+            self._png[group] = png
 
     async def flush_pings(self) -> None:
         """Send the collected calendar changes once the oldest is PING_BATCH old."""
         if not self._pending or self.clock() - self._pending_at < PING_BATCH:
             return
-        text = "🗓️ Calendar updated: " + "; ".join(self._pending)
-        self._pending = []
-        if self.quiet() and self.hold:
-            await self.hold(text)           # held like other pings; sent when quiet hours end
-            return
-        try:
-            await self.discord.dm_owner(text[:1900], self._last_png)
-        except Exception:
-            log.exception("calendar ping failed")
+        pending, self._pending = self._pending, {}
+        for group, lines in pending.items():
+            # one DM per group, with that group's own board ("FlaVR" stays unnamed: it's the main one)
+            label = "" if group == "flavr" else f"{groups.name(group)} "
+            text = f"🗓️ {label}{'calendar' if label else 'Calendar'} updated: " + "; ".join(lines)
+            if self.quiet() and self.hold:
+                await self.hold(text)           # held like other pings; sent when quiet hours end
+                continue
+            png = self._png.get(group)
+            if png is None and self.shooter is not None:
+                png = await self.png(self.build(group, self.week_of(0)))    # no post drawn yet this run
+            try:
+                await self.discord.dm_owner(text[:1900], png)
+            except Exception:
+                log.exception("calendar ping failed")

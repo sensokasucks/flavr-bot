@@ -164,6 +164,33 @@ class FakeDiscord:
         self.dms.append(text)
 
 
+async def test_calendar_dm_per_group_with_its_own_board(tmp_path):
+    # Sen 2026-11-20: "VTC: Mumkey Dee ended" came with the FlaVR board. Each group's changes now come
+    # in their own DM, with that group's picture.
+    store, lulu, pip, sen = setup()
+    clock = {"t": ts(2026, 11, 17, 12)}
+    d = FakeDiscord()
+    pics = []
+
+    async def dm(text, png=None):
+        d.dms.append(text)
+        pics.append(png)
+
+    d.dm_owner = dm
+    p = CalendarPoster(store, d, ImageCache(tmp_path), None, ping=lambda: True, clock=lambda: clock["t"])
+    store.put("calendar_channel.flavr", "55")
+    store.put("calendar_channel.friends", "66")
+    await p.tick()
+    p._png = {"flavr": b"FLAVR", "friends": b"FRIENDS"}          # the boards drawn so far
+    store.replace_scheduled(lulu, "youtube", [{"key": "v", "at": ts(2026, 11, 19, 19)}], now=clock["t"])
+    store.replace_scheduled(pip, "youtube", [{"key": "w", "at": ts(2026, 11, 20, 20)}], now=clock["t"])
+    await p.tick()
+    clock["t"] += 11 * 60
+    await p.tick()
+    assert sorted(zip(d.dms, pics)) == [("🗓️ Calendar updated: Lulu scheduled Thu 7 PM", b"FLAVR"),
+                                        ("🗓️ Friends calendar updated: Pippa scheduled Fri 8 PM", b"FRIENDS")]
+
+
 async def test_poster_rhythm(tmp_path):
     store, lulu, pip, sen = setup()
     clock = {"t": ts(2026, 11, 17, 12)}                 # Tuesday noon

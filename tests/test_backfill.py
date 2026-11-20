@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from flavrbot.calendar import build_week
 from flavrbot.calendar_post import CalendarPoster
 from flavrbot.platforms.twitch import Twitch, duration_sec
-from flavrbot.platforms.youtube import YouTube
+from flavrbot.platforms.youtube import DEEP_CHECK, YouTube
 from flavrbot.store import Store
 from flavrbot.watcher import Watcher
 
@@ -139,12 +139,14 @@ async def test_youtube_past_streams_uses_real_start_and_end():
 
 async def test_youtube_finds_waiting_rooms_gone_from_the_feed():
     # Amanda's case (2026-11-20): a waiting room made a month ahead fell out of the 15-video RSS feed.
-    # The daily search finds it; after that it's asked about directly until it starts.
+    # The deep check (here: daily) finds it; after that it's asked about directly until it starts.
     cid = "UC" + "a" * 22
     upcoming = {"items": [{"id": "w", "snippet": {"title": "Folk Blues", "liveBroadcastContent": "upcoming"},
                            "liveStreamingDetails": {"scheduledStartTime": "2026-11-22T12:00:00Z"}}]}
-    http = FakeHttp([("/search", {"items": [{"id": {"videoId": "w"}}]}), ("/videos", upcoming)])
+    http = FakeHttp([("/search", {"items": [{"id": {"videoId": "w"}}]}), ("/videos", upcoming),
+                     ("/playlistItems", {"items": []})])     # 50+ newer videos: not in the uploads list either
     y = YouTube(http, "key")
+    y.search_every = DEEP_CHECK["daily"]
 
     async def empty_feed(channel_id):
         return []                                   # the waiting room isn't among the 15 newest
@@ -160,3 +162,27 @@ async def test_youtube_finds_waiting_rooms_gone_from_the_feed():
                                               "liveStreamingDetails": {"actualStartTime": "2026-11-22T12:01:00Z"}}]})
     out = await y.live([{"platform_id": cid}])
     assert out[cid]["video_id"] == "w" and y._upcoming_ids == {}
+
+
+async def test_youtube_uploads_list_finds_old_waiting_rooms_and_deep_check_is_off_by_default():
+    # The cheap safety net: the 50 newest uploads every UPLOADS_EVERY (1 quota unit). No search.list
+    # (100 units) unless the owner turns the deep check on (/setup youtube-check).
+    cid = "UC" + "b" * 22
+    upcoming = {"items": [{"id": "w2", "snippet": {"title": "Premiere night", "liveBroadcastContent": "upcoming"},
+                           "liveStreamingDetails": {"scheduledStartTime": "2026-11-22T12:00:00Z"}},
+                          {"id": "up", "snippet": {"title": "A short", "liveBroadcastContent": "none"}}]}
+    http = FakeHttp([("/playlistItems", {"items": [{"contentDetails": {"videoId": "w2"}},
+                                                   {"contentDetails": {"videoId": "up"}}]}),
+                     ("/videos", upcoming), ("/search", {"items": []})])
+    y = YouTube(http, "key")
+    assert y.search_every == 0
+
+    async def empty_feed(channel_id):
+        return []
+
+    y.feed = empty_feed
+    await y.live([{"platform_id": cid}])
+    assert [u["video_id"] for u in y.upcoming[cid]] == ["w2"] and "up" in y._done
+    await y.live([{"platform_id": cid}])            # the uploads list again only after UPLOADS_EVERY
+    assert sum(1 for url, _ in http.calls if "/playlistItems" in url) == 1
+    assert not any("/search" in url for url, _ in http.calls)

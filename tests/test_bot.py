@@ -20,6 +20,11 @@ async def test_commands_register():
     assert menus == ["Add to community calendar", "Remove from community calendar"]
     community = next(c for c in bot.tree.get_commands() if c.name == "community")
     assert sorted(c.name for c in community.commands) == ["list", "remove", "report-channel", "roles", "schedule"]
+    # /calendar view and /calendar post take the same "when" as /calendar focus (Sen 2026-11-20)
+    cal = next(c for c in bot.tree.get_commands() if c.name == "calendar")
+    for name in ("view", "post", "focus", "share"):
+        cmd = next(c for c in cal.commands if c.name == name)
+        assert "when" in [p.name for p in cmd.parameters], name
     assert names == ["backup", "birthday", "calendar", "community", "friend", "group", "growth", "live", "live-mode", "lockdown",
                      "me", "mod", "modmail", "pings", "points", "queue", "roles", "said", "schedule", "setup", "status",
                      "talent", "wake", "warn", "warnings", "welcome"]
@@ -32,7 +37,8 @@ async def test_commands_register():
     assert sorted(c.name for c in group.commands) == ["add", "edit", "list", "remove"]
     setup = next(c for c in bot.tree.get_commands() if c.name == "setup")
     assert sorted(c.name for c in setup.commands) == ["calendar-channel", "check", "day-posts", "live-channel", "mod-log",
-                                                      "modmail", "moments", "recap-channel", "share-style", "starboard"]
+                                                      "modmail", "moments", "recap-channel", "share-style", "starboard",
+                                                      "youtube-check"]
     # without the developer-portal switches the bot asks for neither privileged intent (it would be refused)
     assert not bot.intents.members and not bot.intents.message_content
     # every command's description fits Discord's 100-character limit

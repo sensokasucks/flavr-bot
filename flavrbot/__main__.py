@@ -29,7 +29,7 @@ from .promo import Promo
 from .recap import Recapper
 from .platforms.kick import Kick
 from .platforms.twitch import Twitch
-from .platforms.youtube import YouTube
+from .platforms.youtube import DEEP_CHECK, YouTube
 from .render import ImageCache, Screenshotter
 from .server_care import gateway_intents
 from .store import Store
@@ -60,6 +60,8 @@ async def main() -> int:
             "youtube": YouTube(http, s.youtube_api_key),
             "kick": Kick(http, s.kick_client_id, s.kick_client_secret),
         }
+        # the YouTube deep check (/setup youtube-check; off unless the owner picked daily / 48h / weekly)
+        checkers["youtube"].search_every = DEEP_CHECK.get(str(store.get("youtube_deep_check") or "off"), 0.0)
         watcher = Watcher(store, checkers, {"twitch": s.twitch_every, "youtube": s.youtube_every, "kick": s.kick_every})
         bot: FlavrBot
 

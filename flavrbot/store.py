@@ -251,6 +251,41 @@ class Store:
             except sqlite3.IntegrityError:
                 return False
 
+    def change_account(self, person_id: int, platform: str, handle: str) -> str:
+        """/friend edit: give a person a new channel on ``platform`` (replacing the one they had, or added
+        when they had none). The channel id / name / picture are cleared so the watcher looks it up
+        again; upcoming streams from the old channel go. → "changed" | "added" | "taken" (someone else
+        already has that channel)."""
+        with self._lock:
+            mine = self._db.execute("SELECT id FROM accounts WHERE person_id=? AND platform=?",
+                                    (person_id, platform)).fetchone()
+            try:
+                if mine:
+                    self._db.execute("UPDATE accounts SET handle=?, platform_id='', display='', avatar='' WHERE id=?",
+                                     (handle, mine["id"]))
+                    self._db.execute("DELETE FROM scheduled WHERE person_id=? AND platform=? AND at>?",
+                                     (person_id, platform, time.time()))
+                else:
+                    self._db.execute("INSERT INTO accounts(person_id, platform, handle) VALUES(?,?,?)",
+                                     (person_id, platform, handle))
+                self._db.commit()
+            except sqlite3.IntegrityError:
+                self._db.rollback()
+                return "taken"
+            return "changed" if mine else "added"
+
+    def remove_account(self, person_id: int, platform: str) -> bool:
+        """/friend drop: stop following one of a person's platforms (the person and their other
+        channels stay). Upcoming streams from it go; past streams stay on the calendar. If it was
+        their main platform, the main falls back to the default order (flavrbot/watcher.py)."""
+        with self._lock:
+            cur = self._db.execute("DELETE FROM accounts WHERE person_id=? AND platform=?", (person_id, platform))
+            self._db.execute("DELETE FROM scheduled WHERE person_id=? AND platform=? AND at>?",
+                             (person_id, platform, time.time()))
+            self._db.execute("UPDATE people SET main_platform='' WHERE id=? AND main_platform=?", (person_id, platform))
+            self._db.commit()
+            return cur.rowcount > 0
+
     def set_account_info(self, account_id: int, platform_id: str = "", display: str = "", avatar: str = "") -> None:
         with self._lock:
             self._db.execute("UPDATE accounts SET platform_id=COALESCE(NULLIF(?, ''), platform_id), "

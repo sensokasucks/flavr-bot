@@ -20,7 +20,7 @@ async def test_commands_register():
     me = next(c for c in bot.tree.get_commands() if c.name == "me")
     assert sorted(c.name for c in me.commands) == ["hide", "main", "posts", "schedule", "share", "unschedule", "x"]
     friend = next(c for c in bot.tree.get_commands() if c.name == "friend")
-    assert sorted(c.name for c in friend.commands) == ["add", "group", "hide", "import", "list", "main",
+    assert sorted(c.name for c in friend.commands) == ["add", "drop", "edit", "group", "hide", "import", "list", "main",
                                                        "remove", "schedule", "unschedule", "x"]
     group = next(c for c in bot.tree.get_commands() if c.name == "group")
     assert sorted(c.name for c in group.commands) == ["add", "edit", "list", "remove"]

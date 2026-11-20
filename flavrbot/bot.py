@@ -14,6 +14,8 @@ up to an hour to show the first time):
   Owner (OWNER_ID) or Manage Server
     /friend add name platform handle [group] [owner]   follow a channel (adds the person if new)
     /friend remove name    /friend main name platform   /friend import list
+    /friend edit name platform handle   change (or add) one of someone's channels
+    /friend drop name platform   stop following one of someone's platforms, keep the rest
     /friend schedule name day time [title]   a regular weekly time by hand (Kick, no-schedule people)
     /friend unschedule name    /friend hide name hidden   (keep someone off the calendar)
     /friend group name group   move someone to another group
@@ -601,6 +603,56 @@ class FlavrBot(discord.Client):
                 return
             ok = bot.store.remove_person(name)
             await inter.response.send_message(f"Removed {name}." if ok else f"No one called {name}.", ephemeral=True)
+
+        async def person_auto(inter: discord.Interaction, current: str) -> List[app_commands.Choice[str]]:
+            # names typed with suggestions for /friend edit and /friend drop
+            cur = current.lower()
+            return [app_commands.Choice(name=p["name"][:100], value=p["name"][:100])
+                    for p in bot.store.people() if cur in p["name"].lower()][:25]
+
+        @friend.command(name="edit", description="Change someone's channel on a platform (adds it if they have none)")
+        @app_commands.choices(platform=plat_choices)
+        @app_commands.autocomplete(name=person_auto)
+        @app_commands.describe(handle="The new channel: @handle, channel name, or YouTube channel id (UC...)")
+        async def friend_edit(inter: discord.Interaction, name: str, platform: app_commands.Choice[str], handle: str):
+            # store.change_account: the watcher looks the new channel up at its next check
+            if not await managers_only(inter):
+                return
+            p = bot.store.person(name)
+            if not p:
+                await inter.response.send_message(f"No one called {name}. /friend list shows everyone.", ephemeral=True)
+                return
+            what = bot.store.change_account(p["id"], platform.value, handle.strip())
+            if what == "taken":
+                await inter.response.send_message(f"{platform.name} {handle} already belongs to someone else on the list.",
+                                                  ephemeral=True)
+                return
+            await inter.response.send_message(
+                f"{p['name']}'s {platform.name} is now {handle.strip()}" + (" (added)" if what == "added" else "")
+                + ". The bot looks it up at its next check, within a few minutes.", ephemeral=True)
+
+        @friend.command(name="drop", description="Stop following one of someone's platforms (keeps the others)")
+        @app_commands.choices(platform=plat_choices)
+        @app_commands.autocomplete(name=person_auto)
+        async def friend_drop(inter: discord.Interaction, name: str, platform: app_commands.Choice[str]):
+            # store.remove_account: past streams stay on the calendar, upcoming ones from it go
+            if not await managers_only(inter):
+                return
+            p = bot.store.person(name)
+            if not p:
+                await inter.response.send_message(f"No one called {name}. /friend list shows everyone.", ephemeral=True)
+                return
+            if not any(a["platform"] == platform.value for a in p["accounts"]):
+                await inter.response.send_message(f"{p['name']} has no {platform.name} on the list.", ephemeral=True)
+                return
+            if len(p["accounts"]) == 1:
+                await inter.response.send_message(f"That's {p['name']}'s only platform. To stop following them, use "
+                                                  "/friend remove; to switch channels, /friend edit.", ephemeral=True)
+                return
+            bot.store.remove_account(p["id"], platform.value)
+            left = ", ".join(a["platform"].title() for a in p["accounts"] if a["platform"] != platform.value)
+            await inter.response.send_message(f"No longer following {p['name']} on {platform.name}. Still on: {left}.",
+                                              ephemeral=True)
 
         @friend.command(name="main", description="Which platform a person's posts link to first")
         @app_commands.choices(platform=plat_choices)

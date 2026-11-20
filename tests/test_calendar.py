@@ -1,6 +1,7 @@
 """Weekly calendar (flavrbot/calendar.py, calendar_post.py, render.py, web.py): no network, no Discord."""
 
 import json
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -234,3 +235,26 @@ async def test_web_pages(tmp_path):
         assert (await client.get("/calendar.png")).status == 503          # no Chromium in tests
         assert (await client.get("/calendar/img/..%2Fsecret")).status == 404
         assert (await client.get("/health")).status == 200
+
+
+def test_edit_and_drop_one_platform():
+    # /friend edit and /friend drop (store.change_account / remove_account), Sen 2026-11-20
+    store, lulu, pip, sen = setup()
+    store.add_account(lulu, "twitch", "luluteala")
+    acc = next(a for a in store.person("Lulu")["accounts"] if a["platform"] == "youtube")
+    store.set_account_info(acc["id"], platform_id="UC" + "l" * 22, display="Lulu")
+    store.set_main(lulu, "twitch")
+    future = time.time() + 86400
+    store.replace_scheduled(lulu, "youtube", [{"key": "v", "at": future}])
+    # a new YouTube channel: looked up again, and the old channel's upcoming stream goes
+    assert store.change_account(lulu, "youtube", "@lulunew") == "changed"
+    yt = next(a for a in store.person("Lulu")["accounts"] if a["platform"] == "youtube")
+    assert yt["handle"] == "@lulunew" and yt["platform_id"] == ""
+    assert not [s for s in store.scheduled_between(0, future + 10) if s["person_id"] == lulu]
+    assert store.change_account(lulu, "kick", "lulu") == "added"
+    assert store.change_account(lulu, "youtube", "@pipkinpippa") == "taken"      # Pippa's channel
+    # dropping Twitch keeps the rest and clears it as the main platform
+    assert store.remove_account(lulu, "twitch")
+    p = store.person("Lulu")
+    assert sorted(a["platform"] for a in p["accounts"]) == ["kick", "youtube"] and p["main_platform"] == ""
+    assert not store.remove_account(lulu, "twitch")

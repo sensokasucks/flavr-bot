@@ -1,6 +1,6 @@
 """
 The community calendar: streams members add from their own self-promo posts, shown on their own
-"Community" board and Saturday week in review (the built-in group "community", flavrbot/groups.py),
+"Community" board and Friday / Monday reviews (the built-in group "community", flavrbot/groups.py),
 separate from FlaVR and Friends. Asked for by the owner 2026-11-20.
 
 How a stream gets on it (opt-in per post; the bot never reads a channel on its own)
@@ -452,7 +452,7 @@ class Promo:
 
 
 # ── Discord side: the message menu entries and /community (registered by flavrbot/bot.py) ──
-ADDED_NOTE = "It shows on the community calendar and in Saturday's week in review."
+ADDED_NOTE = "It shows on the community calendar and in the next review (Friday for Monday to Thursday, Monday for the weekend)."
 
 
 def register(tree: Any, bot: Any, managers_only: Callable[[Any], Awaitable[bool]]) -> None:
@@ -625,7 +625,7 @@ def register(tree: Any, bot: Any, managers_only: Callable[[Any], Awaitable[bool]
         if bot.calendar:
             bot.calendar.poke()
         await inter.response.send_message(f"The community calendar goes to {channel.mention}; the first post comes "
-                                          "within a minute, the week in review on Saturday night.", ephemeral=True)
+                                          "within a minute, the reviews on Friday and Monday.", ephemeral=True)
 
     tree.add_command(community)
 

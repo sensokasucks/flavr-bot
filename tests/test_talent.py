@@ -65,12 +65,12 @@ async def test_week_card_posts_pins_edits_and_recaps(tmp_path):
     week = talent.only(p.build("flavr", p.week_of(0)), lulu)
     card = talent.week_card(week, "Lulu")
     assert all("Sensoka" not in v for _, v in card["fields"]) and any("Thu stream" in v for _, v in card["fields"])
-    # Saturday 11 PM: her recap, once
-    clock["t"] = ts(2026, 11, 21, 23, 5)
+    # Friday 10 AM: her week review (Mon-Thu), once
+    clock["t"] = ts(2026, 11, 20, 10, 5)
     await p.tick()
     await p.tick()
     recaps = [x for x in d.sent if "week in review" in x[1]]
-    assert recaps == [("20", "📼 Lulu · week in review · Nov 15 – 21", "")]
+    assert recaps == [("20", "📼 Lulu · week in review · Nov 16 – 19", "")]
     rc = talent.week_card(talent.only(p.build("flavr", p.week_of(0), recap=True), lulu), "Lulu")
     assert rc["footer"] == "1 stream · 2.5h live · longest: Cozy"
     # Sunday 10 AM: a new card for the new week, pinned; last week's unpinned

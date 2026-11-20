@@ -98,10 +98,11 @@ async def main() -> int:
         link.on_alert = on_core_alert
         link.on_moment = recapper.on_moment
         link.on_core_lost = pinger.core_lost
+        link.owner_live = watcher.owner_live    # offline everywhere = the stream ended; Core closing isn't a crash
         link.on_core_back = pinger.core_back
         shooter = Screenshotter(s.chromium_path)
         poster = CalendarPoster(store, bot, ImageCache(Path(s.data_dir) / "cache" / "img", http), shooter,
-                                tz=s.timezone, preview_hour=s.calendar_preview_hour, recap_hour=s.calendar_recap_hour,
+                                tz=s.timezone, preview_hour=s.calendar_preview_hour,
                                 ping=lambda: pinger.switches().get("calendar", False), quiet=pinger.quiet_now,
                                 hold=lambda text: pinger.ping("calendar", text), backfill=watcher.backfill,
                                 share_on=lambda: pinger.switches().get("share", False))

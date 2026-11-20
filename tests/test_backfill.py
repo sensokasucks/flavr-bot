@@ -47,7 +47,7 @@ def world(yt_rows, tw_rows):
 
 async def test_backfill_fills_an_empty_week_and_merges_multistreams():
     store, ch, w = world([vod(20, 3, "yt1"), vod(72, 2, "yt2")], [vod(20.2, 3.1, "tw1")])
-    assert await w.backfill(A, A + 7 * 86400) == 2
+    assert await w.backfill(A, A + 7 * 86400, everyone=True) == 2
     week = build_week(store, "flavr", SUN, NOW, TZ, recap=True)
     tiles = week.tiles()
     assert len(tiles) == 2
@@ -57,7 +57,24 @@ async def test_backfill_fills_an_empty_week_and_merges_multistreams():
     assert first.end == A + 23.3 * 3600         # the later of the two ends (Twitch 20.2 h + 3.1 h)
     assert not first.late                        # filled-in streams never get LATE NOTICE
     # a second run adds nothing (it overlaps what is now saved)
-    assert await w.backfill(A, A + 7 * 86400) == 0
+    assert await w.backfill(A, A + 7 * 86400, everyone=True) == 0
+
+
+async def test_youtube_is_only_asked_about_active_people_once_per_activity():
+    # owner 2026-11-20: free checks flag who did something; YouTube's costly list only for them, once
+    store, ch, w = world([vod(20, 3, "yt1")], [vod(50, 2, "tw1")])
+    pid = store.people()[0]["id"]
+    assert await w.backfill(A, A + 7 * 86400) == 1            # Twitch (free) still asked; YouTube not
+    assert ch["youtube"].asked == 0 and ch["twitch"].asked == 1
+    store.note_activity(pid, [A + 20 * 3600], now=NOW)        # the RSS feed showed a video those days
+    assert await w.backfill(A, A + 7 * 86400) == 1 and ch["youtube"].asked == 1
+    await w.backfill(A, A + 7 * 86400)                         # nothing new since: not asked again
+    assert ch["youtube"].asked == 1
+    store.note_activity(pid, [NOW - 3600], now=NOW)           # outside those days: still not due
+    await w.backfill(A, A + 7 * 86400)
+    assert ch["youtube"].asked == 1
+    await w.backfill(A, A + 7 * 86400, everyone=True)          # /calendar refresh: everyone
+    assert ch["youtube"].asked == 2
 
 
 async def test_backfill_skips_what_the_watcher_saw_and_streams_still_running():
@@ -67,17 +84,20 @@ async def test_backfill_skips_what_the_watcher_saw_and_streams_still_running():
     # ended 5 minutes ago: may still be live, the watcher owns it
     ch["youtube"].rows["UCamanda"].append({"started_at": NOW - 3600, "ended_at": NOW - 300, "title": "now",
                                            "url": "yt9", "thumb": ""})
-    assert await w.backfill(A, NOW) == 0
+    assert await w.backfill(A, NOW, everyone=True) == 0
     assert [s["title"] for s in store.sessions_between(A, NOW)] == ["seen live"]
 
 
 async def test_ensure_backfill_runs_once_per_finished_week():
     store, ch, w = world([vod(20, 3, "yt1")], [])
     poster = CalendarPoster(store, None, None, None, clock=lambda: NOW, backfill=w.backfill)
+    store.note_activity(store.people()[0]["id"], [A + 20 * 3600], now=NOW)     # active that week
     assert await poster.ensure_backfill(SUN) == 1
     asked = ch["youtube"].asked
     assert await poster.ensure_backfill(SUN) == 0 and ch["youtube"].asked == asked     # not asked again
-    await poster.ensure_backfill(SUN, force=True)                                     # /calendar refresh
+    await poster.ensure_backfill(SUN, force=True)                     # before a review: nothing new, no quota
+    assert ch["youtube"].asked == asked
+    await poster.ensure_backfill(SUN, force=True, everyone=True)      # /calendar refresh
     assert ch["youtube"].asked == asked + 1
 
 

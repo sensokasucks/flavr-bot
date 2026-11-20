@@ -322,7 +322,7 @@ def page(week: Week, img: Img, logo: str = "", footer_note: str = "", refresh: i
             gone = week.recap or (0 <= today and i < today)
             body = f'<div class="empty">{"No streams" if gone else "Nothing scheduled yet"}</div>'
         del day
-        cols += (f'<div class="day d{i % 4} {state}"><div class="dh"><span>{DAY_NAMES[i]}</span><b>{date.day}</b>'
+        cols += (f'<div class="day d{i % 4} {state}"><div class="dh"><span>{week.day_name(i)}</span><b>{date.day}</b>'
                  f'{"<em>TODAY</em>" if i == today else ""}</div>{body}</div>')
     if week.recap:
         stats = f"{week.stream_count} streams · {week.hours_live:.0f} hours live"
@@ -342,7 +342,9 @@ def page(week: Week, img: Img, logo: str = "", footer_note: str = "", refresh: i
     return (f'<!doctype html><html><head><meta charset="utf-8">{meta}<title>{html.escape(week.title.title())}</title>'
             f'<style>:root{{{theme(week.group)}}}{CSS}</style></head><body>'
             f'<header><h1>{head}</h1><div class="range">{html.escape(week.range_text)} · {html.escape(tz_words(week.tz))}</div>'
-            f'<div class="stats">{stats}</div></header><div class="grid">{cols}</div>'
+            f'<div class="stats">{stats}</div></header>'
+            # a review has 4 or 3 day columns instead of 7 (CSS default: 7)
+            f'<div class="grid"{"" if len(week.days) == 7 else f" style=grid-template-columns:repeat({len(week.days)},minmax(0,1fr))"}>{cols}</div>'
             f'<footer><span>{html.escape(quiet)}</span><span>{html.escape(foot)}</span></footer></body></html>')
 
 

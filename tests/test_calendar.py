@@ -209,15 +209,19 @@ async def test_poster_rhythm(tmp_path):
     clock["t"] += 11 * 60
     await p.tick()
     assert d.dms == ["🗓️ Calendar updated: Lulu scheduled Thu 7 PM"]
-    # Saturday 11 PM: the recap, once
+    # Friday 10 AM: the week review (Mon-Thu), once; the Saturday recap is gone (owner 2026-11-20)
+    clock["t"] = ts(2026, 11, 20, 10, 5)
+    await p.tick()
+    await p.tick()
+    assert [s[1] for s in d.sent].count("FlaVR week in review · Nov 16 – 19") == 1
+    assert d.sent[-1][2] == "week-review-2026-11-16.png"
     clock["t"] = ts(2026, 11, 21, 23, 5)
     await p.tick()
-    await p.tick()
-    assert [s[1] for s in d.sent].count("FlaVR: week in review · Nov 15 – 21") == 1
+    assert not any("Nov 15 – 21" in s[1] and "review" in s[1] for s in d.sent)
     # Sunday 9 AM: still last week's post; 10 AM: a new post for the new week
     clock["t"] = ts(2026, 11, 22, 9)
     await p.tick()
-    assert d.sent[-1][1].startswith("FlaVR: week in review")
+    assert d.sent[-1][1].startswith("FlaVR week in review")
     clock["t"] = ts(2026, 11, 22, 10, 1)
     await p.tick()
     assert d.sent[-1][1] == "This week in FlaVR · Nov 22 – 28"
@@ -229,6 +233,16 @@ async def test_poster_rhythm(tmp_path):
     d.gone = False
     await p.tick()
     assert d.sent[-1][1] == "This week in FlaVR · Nov 22 – 28" and len([s for s in d.sent if "Nov 22" in s[1]]) == 2
+    # Monday 10 AM: the weekend review (Fri-Sun just gone), once
+    clock["t"] = ts(2026, 11, 23, 10, 5)
+    await p.tick()
+    await p.tick()
+    assert [s[1] for s in d.sent].count("FlaVR weekend in review · Nov 20 – 22") == 1
+    # /setup review-times week:off: no Friday post
+    store.put("review_times", {"week": None})
+    clock["t"] = ts(2026, 11, 27, 11)
+    await p.tick()
+    assert not any("Nov 23 – 26" in s[1] for s in d.sent)
 
 
 async def test_find_vod_youtube_and_kick():

@@ -74,9 +74,9 @@ class Settings:
     quiet_hours: tuple[int, int] = (3, 11)
     big_tip: float = 20.0               # tips / Super Chats at least this much (in their own currency)
     big_gift: int = 10                  # gifted subs at least this many at once
-    # Weekly calendar (flavrbot/calendar_post.py): Sunday preview hour, Saturday recap hour (TZ, 0-23)
+    # Weekly calendar (flavrbot/calendar_post.py): Sunday preview hour (TZ, 0-23); the Friday / Monday
+    # reviews' times are set in Discord (/setup review-times)
     calendar_preview_hour: int = 10
-    calendar_recap_hour: int = 23
     chromium_path: str = ""             # blank = Playwright's own Chromium (the Docker image has it)
     # Server care (flavrbot/server_care.py)
     scam_timeout_min: int = 60          # timeout for someone who posts a scam link (minutes; 0 = none)
@@ -138,7 +138,6 @@ def load(env: Optional[Mapping[str, str]] = None) -> Settings:
         big_tip=float(g("BIG_TIP", "20") or 20),
         big_gift=max(1, _int(env, "BIG_GIFT", 10)),
         calendar_preview_hour=_int(env, "CALENDAR_PREVIEW_HOUR", 10) % 24,
-        calendar_recap_hour=_int(env, "CALENDAR_RECAP_HOUR", 23) % 24,
         chromium_path=g("CHROMIUM_PATH"),
         scam_timeout_min=max(0, min(40320, _int(env, "SCAM_TIMEOUT_MIN", 60))),     # Discord's cap: 28 days
         backup_hour=_int(env, "BACKUP_HOUR", 4) % 24,

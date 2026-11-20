@@ -25,6 +25,9 @@ up to an hour to show the first time):
                         everywhere are typed with suggestions (autocomplete)
     /setup live-channel group channel                   where go-live posts go for a group
     /setup calendar-channel group channel               where the weekly calendar + recap go
+    /setup review-times [week] [weekend]   when the reviews post: Friday (Monday to Thursday) and Monday
+                        (Friday to Sunday), a time or "off" (default 10 AM both; flavrbot/calendar_post.py)
+    /calendar view|post|share review:week|weekend   the newest review, any time
     /setup youtube-check off|daily|48h|weekly   the YouTube deep check for streams scheduled far ahead
                         (search.list, 100 quota units per channel a run; off by default; flavrbot/platforms/youtube.py)
     /setup recap-channel [channel]   where the after-stream recap goes (flavrbot/recap.py; none = DM only)
@@ -69,6 +72,8 @@ up to an hour to show the first time):
   Owner only (answers only you can see)
     /status             Stream Core, the stream, this PC, the watcher
     /wake               Wake-on-LAN the stream PC
+    /core done          my stream is over: no "Stream Core stopped answering" alarm until Core connects again
+                        (the alarm also stays quiet by itself when the watcher sees you offline everywhere)
     /pings view | set kind on | quiet start end          phone ping switches and quiet hours
 
 Every message sets allowed_mentions to nothing, so a stream title can't ping @everyone.
@@ -90,7 +95,7 @@ import discord
 from discord import app_commands
 
 from . import focus, sysinfo, wol
-from .calendar import DAY_NAMES
+from .calendar import DAY_NAMES, REVIEW_NAMES
 from .config import Settings
 from .server_care import MAX_ROLE_BUTTONS, ServerCare, missing
 from .community import Community, missing_more
@@ -459,6 +464,23 @@ class FlavrBot(discord.Client):
                 parts.append(f"{p.title()} {mark} {ago(s['last_check']) if s['ready'] else ''}".strip())
             lines.append(f"**Watcher:** {ws['people']} people · " + " · ".join(parts))
             await inter.response.send_message("\n".join(lines), ephemeral=True)
+
+        core = app_commands.Group(name="core", description="The Stream Core link (owner only)")
+
+        @core.command(name="done", description="My stream is over: stop the Stream Core alarm until Core next connects")
+        async def core_done(inter: discord.Interaction):
+            # flavrbot/core_link.py mark_done: Core's last word becomes "offline", so its silence no longer
+            # pings ("Stream Core stopped answering"), and its next heartbeat comes back quietly
+            if not await owner_only(inter):
+                return
+            was = bot.link.mark_done()
+            await inter.response.send_message(
+                ("Got it: the stream counts as over, and Stream Core going quiet won't ping you. Checks start "
+                 "again by themselves the next time Core connects." if was else
+                 "The bot already had your stream as over; Core going quiet won't ping you. Checks start again "
+                 "the next time Core connects."), ephemeral=True)
+
+        tree.add_command(core)
 
         @tree.command(name="wake", description="Turn the stream PC on (Wake-on-LAN, owner only)")
         async def wake(inter: discord.Interaction):
@@ -878,6 +900,8 @@ class FlavrBot(discord.Client):
         style_choices = [app_commands.Choice(name=label, value=k) for k, (label, _) in X_STYLES.items()]
         week_choices = [app_commands.Choice(name="This week", value=0), app_commands.Choice(name="Next week", value=1),
                         app_commands.Choice(name="Last week (recap)", value=-1)]
+        # the reviews (flavrbot/calendar.py REVIEWS): Friday's Mon-Thu, Monday's Fri-Sun; the newest one
+        review_choices = [app_commands.Choice(name=n, value=k) for k, n in REVIEW_NAMES.items()]
 
         focus_choices = [app_commands.Choice(name=n, value=v) for n, v in
                          [("Today", "today"), ("Tomorrow", "tomorrow"), ("This weekend (Fri to Sun)", "weekend")] +
@@ -908,15 +932,38 @@ class FlavrBot(discord.Client):
             await inter.followup.send(embed=make_embed(data, name if png else ""),
                                       files=files, ephemeral=not post, allowed_mentions=NO_PINGS)
 
+        async def show_review(inter: discord.Interaction, label: str, group: Optional[str], channel_id: str = "") -> None:
+            """The newest week (Mon-Thu) or weekend (Fri-Sun) review: picture + list with its videos.
+            Only to you, or posted in ``channel_id`` (/calendar post review:)."""
+            g = await pick_group(inter, group)
+            if g is None:
+                return
+            await inter.response.defer(ephemeral=True, thinking=True)
+            from .calendar_post import embed as cal_embed
+            w, png = await bot.calendar.review_png(g, label)
+            name = f"{label}-review.png"
+            if channel_id:
+                ok = await bot.cal_send(channel_id, cal_embed(w), png, name)
+                await inter.followup.send("Posted." if ok else "Couldn't post in the calendar channel.", ephemeral=True)
+                return
+            files = [discord.File(io.BytesIO(png), filename=name)] if png else []
+            await inter.followup.send(embed=make_embed(cal_embed(w), name if png else ""), files=files,
+                                      ephemeral=True, allowed_mentions=NO_PINGS)
+
         @calendar.command(name="view", description="The calendar picture and list (only you see it)")
-        @app_commands.choices(week=week_choices, when=focus_choices)
+        @app_commands.choices(week=week_choices, when=focus_choices, review=review_choices)
         @app_commands.autocomplete(group=group_auto)
-        @app_commands.describe(when="Just today, tomorrow, the weekend or a weekday instead of the whole week")
+        @app_commands.describe(when="Just today, tomorrow, the weekend or a weekday instead of the whole week",
+                               review="The newest week review (Mon to Thu) or weekend review (Fri to Sun)")
         async def calendar_view(inter: discord.Interaction, group: Optional[str] = None,
                                 week: Optional[app_commands.Choice[int]] = None,
-                                when: Optional[app_commands.Choice[str]] = None):
+                                when: Optional[app_commands.Choice[str]] = None,
+                                review: Optional[app_commands.Choice[str]] = None):
             if not bot.calendar:
                 await inter.response.send_message("The calendar isn't running.", ephemeral=True)
+                return
+            if review:
+                await show_review(inter, review.value, group)
                 return
             if when:                                    # the focus view (flavrbot/focus.py); ``week`` doesn't apply
                 await show_focus(inter, when.value, group, False)
@@ -963,10 +1010,12 @@ class FlavrBot(discord.Client):
 
         @calendar.command(name="post", description="Post a fresh calendar now (owner or Manage Server)")
         @app_commands.autocomplete(group=group_auto)
-        @app_commands.choices(when=focus_choices)
-        @app_commands.describe(when="Post just today, tomorrow, the weekend or a weekday (an extra post; the week stays)")
+        @app_commands.choices(when=focus_choices, review=review_choices)
+        @app_commands.describe(when="Post just today, tomorrow, the weekend or a weekday (an extra post; the week stays)",
+                               review="Post the newest week review (Mon to Thu) or weekend review (Fri to Sun) now")
         async def calendar_post_now(inter: discord.Interaction, group: Optional[str] = None,
-                                    when: Optional[app_commands.Choice[str]] = None):
+                                    when: Optional[app_commands.Choice[str]] = None,
+                                    review: Optional[app_commands.Choice[str]] = None):
             if not await managers_only(inter):
                 return
             g = groups.find(group)
@@ -975,6 +1024,9 @@ class FlavrBot(discord.Client):
                 return
             if not bot.calendar or not bot.store.get(f"calendar_channel.{g}"):
                 await inter.response.send_message("Pick its channel first: /setup calendar-channel.", ephemeral=True)
+                return
+            if review:
+                await show_review(inter, review.value, g, channel_id=str(bot.store.get(f"calendar_channel.{g}")))
                 return
             if when:
                 # a one-off focus post in the group's calendar channel (the automatic ones: /setup day-posts)
@@ -995,19 +1047,22 @@ class FlavrBot(discord.Client):
                 return
             await inter.response.defer(ephemeral=True, thinking=True)
             off = week.value if week else -1
-            added = await bot.calendar.ensure_backfill(bot.calendar.week_of(off), force=True)
+            # by hand: YouTube is asked about everyone, not only people the free checks saw active
+            added = await bot.calendar.ensure_backfill(bot.calendar.week_of(off), force=True, everyone=True)
             await inter.followup.send(f"Found {added} stream(s) the bot hadn't seen. Twitch keeps past broadcasts "
                                       "7 days (60 for partners); Kick has no list of past streams.", ephemeral=True)
 
         @calendar.command(name="share", description="DMs you copy-ready text for other Discords and X")
-        @app_commands.choices(week=week_choices, style=style_choices, when=focus_choices)
+        @app_commands.choices(week=week_choices, style=style_choices, when=focus_choices, review=review_choices)
         @app_commands.autocomplete(group=group_auto)
         @app_commands.describe(style="X layout this time (default: /setup share-style)",
-                               when="Just these days instead of the week (today, tomorrow, the weekend, a weekday)")
+                               when="Just these days instead of the week (today, tomorrow, the weekend, a weekday)",
+                               review="The newest week review (Mon to Thu) or weekend review (Fri to Sun)")
         async def calendar_share(inter: discord.Interaction, group: Optional[str] = None,
                                  week: Optional[app_commands.Choice[int]] = None,
                                  style: Optional[app_commands.Choice[str]] = None,
-                                 when: Optional[app_commands.Choice[str]] = None):
+                                 when: Optional[app_commands.Choice[str]] = None,
+                                 review: Optional[app_commands.Choice[str]] = None):
             here = talent.person_for_channel(bot.store, inter.channel_id)
             if here and not group and bot.calendar and (bot.may_manage(inter) or here.get("discord_user") == str(inter.user.id)):
                 # in a talent channel: that person's own share text, DMed to whoever asked (flavrbot/talent.py)
@@ -1029,7 +1084,9 @@ class FlavrBot(discord.Client):
             if g is None:
                 return
             await inter.response.defer(ephemeral=True, thinking=True)
-            if when:                # just those days (flavrbot/focus.py); the X Article style falls back to "reply"
+            if review:              # the review's package, its X Article included (?review= on the article page)
+                ok = await bot.calendar.share_review(g, review.value, style.value if style else "")
+            elif when:              # just those days (flavrbot/focus.py); the X Article style falls back to "reply"
                 ok = await focus.share(bot.calendar, g, when.value, style.value if style else "")
             else:
                 ok = await bot.calendar.share(g, week.value if week else 0,
@@ -1151,6 +1208,33 @@ class FlavrBot(discord.Client):
             extra.append("tagging people's X handles" if bot.store.get("share_x_tag") else "nobody tagged")
             await inter.response.send_message(f"X text: {X_STYLES[style.value][1]}" + (f"; {', '.join(extra)}" if extra
                                               else "") + ".", ephemeral=True)
+
+        @setup.command(name="review-times", description="When the Friday week review and Monday weekend review post")
+        @app_commands.describe(week="Friday's review of Monday to Thursday: a time (10am) or off",
+                               weekend="Monday's review of Friday to Sunday: a time (10am) or off")
+        async def setup_review_times(inter: discord.Interaction, week: Optional[str] = None, weekend: Optional[str] = None):
+            # flavrbot/calendar_post.py review_times (kv "review_times"; default 10 AM both)
+            if not await managers_only(inter):
+                return
+            have = dict(bot.store.get("review_times") or {})
+            for label, text in (("week", week), ("weekend", weekend)):
+                if text is None:
+                    continue
+                if text.strip().lower() in ("off", "none", "no"):
+                    have[label] = None
+                    continue
+                m = parse_time(text)
+                if m is None:
+                    await inter.response.send_message(f"I couldn't read \"{text}\" as a time. Try 10am or 6:30pm.",
+                                                      ephemeral=True)
+                    return
+                have[label] = m
+            bot.store.put("review_times", have)
+            t = bot.calendar.review_times() if bot.calendar else {}
+            words = lambda m: "off" if m is None else time_words(m)      # noqa: E731
+            await inter.response.send_message(f"Week review (Monday to Thursday): Friday {words(t.get('week'))}. "
+                                              f"Weekend review (Friday to Sunday): Monday {words(t.get('weekend'))}.",
+                                              ephemeral=True)
 
         @setup.command(name="youtube-check", description="YouTube deep check for streams scheduled far ahead (100 quota units each)")
         @app_commands.choices(how_often=[app_commands.Choice(name="Off (default)", value="off"),

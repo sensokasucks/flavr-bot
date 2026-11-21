@@ -6,27 +6,24 @@ Kinds (each can be switched with /pings; the defaults are in KINDS):
   stream   your stream started / ended (from Core, core/stream_state.py)
   drop     every platform went offline mid-stream, and when it's back (URGENT)
   core     Stream Core stopped answering during a stream, and when it's back (URGENT). Not when the
-           go-live watcher says you're offline everywhere (Core closed before saying the stream
-           ended); /core done tells the bot the stream is over by hand (flavrbot/core_link.py)
+           go-live watcher (FlaVR Promo's /live.json, PROMO_URL) says you're offline everywhere
+           (Core closed before saying the stream ended); /core done tells the bot the stream is over by hand (flavrbot/core_link.py)
   raid     a raid came in
   money    a big tip / Super Chat (BIG_TIP or more) or a big sub gift (BIG_GIFT subs or more)
-  friends  someone the go-live watcher follows went live (sent as one list every 10 minutes)
-  calendar the weekly calendar changed: new schedules, go-lives, ends, new week / recap posted
-           (collected for 10 minutes, sent with the picture; flavrbot/calendar_post.py)
-  share    copy-ready calendar text for other Discords and X, after the Sunday post and the
-           Friday / Monday review (flavrbot/share.py; waits for the end of quiet hours)
   growth   the server's joins and leaves last week, Sunday at MOMENTS_HOUR (flavrbot/community.py)
   chat_moments  chat suddenly got much busier during your stream, with the Twitch clip when Core
            made one (flavrbot/recap.py; off by default)
   recap    the after-stream recap, a few minutes after Core says the stream ended (flavrbot/recap.py)
+
+Friends going live, calendar changes and the copy-ready share text moved to FlaVR Promo with the
+calendar (2026-11-20); it has its own /pings for them.
 
 Quiet hours (QUIET_HOURS, default 3-11 in TZ): ordinary pings wait and arrive as one message
 when quiet hours end. URGENT pings always go at once. While Core says you're live, quiet hours
 don't apply (you're clearly awake).
 
 Who calls it: flavrbot/__main__.py hooks ``on_stream`` / ``on_alert`` / ``core_lost`` /
-``core_back`` to flavrbot/core_link.py, ``friend_live`` to flavrbot/watcher.py, and runs
-``run()`` (flushes held / batched pings every minute). ``send`` is the bot's "DM the owner".
+``core_back`` to flavrbot/core_link.py and runs ``run()`` (flushes held pings every minute). ``send`` is the bot's "DM the owner".
 """
 
 from __future__ import annotations
@@ -35,7 +32,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from .store import Store
@@ -49,14 +46,10 @@ KINDS: Dict[str, Tuple[str, bool]] = {
     "core": ("Stream Core stopped answering during a stream (urgent)", True),
     "raid": ("Raids", True),
     "money": ("Big tips, Super Chats and sub gifts", True),
-    "friends": ("Friends going live (every 10 minutes, in one message)", False),
-    "calendar": ("Calendar changes, with the new picture (every 10 minutes at most)", True),
-    "share": ("Copy-ready calendar text for other Discords and X (Sunday + recap)", True),
     "growth": ("Server joins and leaves last week (Sunday)", True),
     "chat_moments": ("Chat suddenly busy during your stream (with the Twitch clip if made)", False),
     "recap": ("After-stream recap: chat, support, moments", True),
 }
-FRIENDS_EVERY = 600.0
 # Core's alert kinds (core/alerts.py KINDS in flavr-leftovers): real money, and sub gifts with a qty
 MONEY_KINDS = ("superchat", "supersticker", "donation", "charity")
 GIFT_KINDS = ("gift", "member_gift")
@@ -107,8 +100,6 @@ class Pinger:
         self.big_gift = big_gift
         self.live = live
         self.clock = clock
-        self._friends: List[str] = []
-        self._friends_at = 0.0
 
     # ── switches ───────────────────────────────────────────────────────
     def switches(self) -> Dict[str, bool]:
@@ -154,17 +145,13 @@ class Pinger:
             log.exception("could not DM the owner")
 
     async def flush(self) -> None:
-        """Send what quiet hours held back, and the friends list every FRIENDS_EVERY seconds."""
+        """Send what quiet hours held back, once they end (``run`` calls it every minute)."""
         if self.quiet_now():
             return
         held = self.store.get("held_pings", []) or []
         if held:
             self.store.put("held_pings", [])
             await self._send("While you were away:\n" + "\n".join(held))
-        if self._friends and self.clock() - self._friends_at >= FRIENDS_EVERY:
-            names, self._friends = self._friends, []
-            self._friends_at = self.clock()
-            await self._send("🟣 Live now: " + ", ".join(names))
 
     async def run(self) -> None:
         while True:
@@ -205,8 +192,3 @@ class Pinger:
 
     async def core_back(self, stream: Dict[str, Any]) -> None:
         await self.ping("core", "✅ Stream Core is answering again.", urgent=True)
-
-    def friend_live(self, name: str, where: str) -> None:
-        """The watcher saw someone start; collected and sent as one list (flush)."""
-        if self.switches().get("friends"):
-            self._friends.append(f"{name} ({where})")

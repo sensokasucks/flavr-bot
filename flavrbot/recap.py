@@ -14,8 +14,8 @@ lets the last chat lines arrive), one message with
   * chat: lines and different chatters (the /said chat copy, flavrbot/said.py), top chatters,
   * support: raids (who, how many), subs, gifted subs, tips / Super Chats, bits and KICKs (the
     alerts Core sent, saved by ``on_alert``),
-  * the moments, each with a link to that time in the VOD (the owner's stream as the go-live
-    watcher saw it: flavrbot/watcher.py session vod_url; Twitch ?t=1h2m3s, YouTube &t=123s) and the
+  * the moments, each with a link to that time in the VOD (the owner's stream as FlaVR Promo's
+    go-live watcher saw it: its /live.json owner_streams, read by flavrbot/promo_link.py; Twitch ?t=1h2m3s, YouTube &t=123s) and the
     Twitch clip when there is one,
   * with OLLAMA_URL set: a few sentences from a local AI (Ollama) on what happened in chat.
 It goes to the channel picked with /setup recap-channel (kv recap_channel) and to the owner's DMs
@@ -29,7 +29,6 @@ wires ``on_stream`` / ``on_alert`` / ``on_moment`` to flavrbot/core_link.py and 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import time
@@ -108,7 +107,7 @@ def recap_text(stream: Dict[str, Any], chat: List[Dict[str, Any]], alerts: List[
                moments: List[Dict[str, Any]], vod: Dict[str, Any], summary: str = "",
                when: str = "") -> str:
     """The recap message (markdown, under 2000 characters). ``stream``: started_at, ended_at,
-    platforms, peak. ``vod``: {url, started_at} of the owner's stream as the watcher saw it ({} = none)."""
+    platforms, peak. ``vod``: {url, started_at} of the owner's stream as FlaVR Promo's watcher saw it ({} = none)."""
     a, b = float(stream["started_at"]), float(stream["ended_at"])
     plats = ", ".join(PLATFORM_NAMES.get(p, p) for p in stream.get("platforms") or [])
     head = f"📼 **Stream recap**{' · ' + when if when else ''} · {length(b - a)}" + (f" on {plats}" if plats else "")
@@ -182,7 +181,8 @@ class Recapper:
     def __init__(self, store: Store, send_channel: Callable[[str, str], Awaitable[None]],
                  ping: Callable[..., Awaitable[None]], heartbeat: Callable[[], Dict[str, Any]],
                  delay_min: int = 3, ollama_url: str = "", ollama_model: str = "", tz: Any = None,
-                 clock: Callable[[], float] = time.time, ai_post: Optional[Callable] = None):
+                 clock: Callable[[], float] = time.time, ai_post: Optional[Callable] = None,
+                 streams: Callable[[], List[Dict[str, Any]]] = lambda: []):
         self.store = store
         self.send_channel = send_channel        # (channel id, text): flavrbot/bot.py post_text
         self.ping = ping                        # Pinger.ping(kind, text)
@@ -192,6 +192,9 @@ class Recapper:
         self.tz = tz
         self.clock = clock
         self.ai_post = ai_post
+        # the owner's recent streams [{started_at, ended_at, url, vod_url}] from FlaVR Promo
+        # (flavrbot/promo_link.py PromoLink.owner_streams; [] without PROMO_URL = no VOD links)
+        self.streams = streams
 
     # ── Core's messages (flavrbot/core_link.py callbacks) ──────────────
     async def on_stream(self, change: Dict[str, Any]) -> None:
@@ -272,24 +275,17 @@ class Recapper:
         return recap_text(p, chat, alerts, moments, self.vod(a, b), summary, when)
 
     def vod(self, a: float, b: float) -> Dict[str, Any]:
-        """The owner's stream that overlaps [a, b] as the go-live watcher saw it: {url, started_at}."""
-        owner = next((x for x in self.store.people() if x.get("is_owner")), None)
-        if not owner:
-            return {}
-        best: Dict[str, Any] = {}
-        for s in self.store.sessions_between(a - 6 * 3600, b):
-            if s["person_id"] != owner["id"]:
+        """The owner's stream that overlaps [a, b] as FlaVR Promo's watcher saw it: {url, started_at}
+        ({} = none). The earliest one that started up to 6 h before Core's start and hadn't ended
+        before it; its VOD when Promo found one, else its live link."""
+        for s in sorted(self.streams(), key=lambda x: float(x.get("started_at") or 0)):
+            try:
+                start = float(s["started_at"])
+            except (KeyError, TypeError, ValueError):
                 continue
             end = float(s.get("ended_at") or b)
-            if end < a:
+            if start < a - 6 * 3600 or start >= b or end < a:
                 continue
-            url = s.get("vod_url") or ""
-            if not url:
-                try:                            # sessions.links is JSON text {platform: url}
-                    links = json.loads(s.get("links") or "{}")
-                except (TypeError, ValueError):
-                    links = {}
-                url = s.get("url") or next(iter(links.values()), "")
-            best = {"url": url, "started_at": float(s["started_at"])}
-            break
-        return best
+            url = s.get("vod_url") or s.get("url") or ""
+            return {"url": url, "started_at": start} if url else {}
+        return {}

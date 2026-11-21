@@ -16,8 +16,8 @@ flavrbot/server_care.py; this file adds:
   Modmail          a member DMs the bot → a thread in the modmail channel (/setup modmail). What mods
                    write in that thread goes back to the member as a DM from the bot (lines starting
                    with // stay among the mods); /modmail close ends it.
-  Live mode        while the owner is live (go-live watcher or Stream Core): slowmode on the channels
-                   picked with /live-mode add, and a voice channel renamed "🔴 LIVE: game"
+  Live mode        while the owner is live (Stream Core, or FlaVR Promo's go-live watcher through
+                   PROMO_URL): slowmode on the channels picked with /live-mode add, and a voice channel renamed "🔴 LIVE: game"
                    (/live-mode voice). Everything goes back when the stream ends.
   Starboard        /setup starboard channel [emoji] [count]: a message that gets ``count`` of that emoji
                    is reposted there once, and its count kept up to date.
@@ -210,6 +210,8 @@ class Community:
         g = member.guild
         rules = f"<#{w['rules_channel']}>" if w.get("rules_channel") else \
             (g.rules_channel.mention if getattr(g, "rules_channel", None) else "")
+        # the FlaVR calendar channel as it was picked before the split (kv calendar_channel.flavr); the
+        # calendar itself is FlaVR Promo's now, so a channel picked there later isn't seen here
         cal = self.store.get("calendar_channel.flavr")
         text = welcome_text(w.get("text") or "", member.mention, member.display_name, g.name, g.member_count or 0,
                             rules, f"<#{cal}>" if cal else "")
@@ -452,8 +454,8 @@ class Community:
 
     # ── live mode ──
     async def live_mode(self, live: bool, game: str = "") -> None:
-        """The owner's stream started (``live``) or ended. Called from flavrbot/__main__.py for the go-live
-        watcher and for Stream Core's stream messages; doing it twice is harmless."""
+        """The owner's stream started (``live``) or ended. Called from flavrbot/__main__.py for FlaVR Promo's
+        go-live watcher (flavrbot/promo_link.py on_owner) and for Stream Core's stream messages; doing it twice is harmless."""
         for g in list(self.bot.guilds):
             lm = self.get("live_mode", g.id)
             if not lm.get("channels") and not lm.get("voice"):

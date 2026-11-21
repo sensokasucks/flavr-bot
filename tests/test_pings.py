@@ -67,21 +67,11 @@ async def test_quiet_hours_off_while_live():
     assert not p.quiet_now()
 
 
-async def test_friends_batched():
-    p, sent, clock = make()
-    p.friend_live("Lulu", "YouTube")          # off by default
-    assert p._friends == []
-    p.set("friends", True)
-    p.friend_live("Lulu", "YouTube")
-    p.friend_live("Raimi", "Twitch")
-    await p.flush()
-    assert sent == ["🟣 Live now: Lulu (YouTube), Raimi (Twitch)"]
-    p.friend_live("Choco", "Kick")
-    await p.flush()                           # within 10 minutes: waits
-    assert len(sent) == 1
-    clock["t"] += 601
-    await p.flush()
-    assert sent[-1] == "🟣 Live now: Choco (Kick)"
+def test_calendar_kinds_moved_to_promo():
+    # friends / calendar / share pings went with the calendar to FlaVR Promo (2026-11-20)
+    from flavrbot.pings import KINDS
+    assert not {"friends", "calendar", "share"} & set(KINDS)
+    assert {"stream", "drop", "core", "raid", "money", "growth", "chat_moments", "recap"} <= set(KINDS)
 
 
 def test_quiet_hours_wrap_and_saved():
